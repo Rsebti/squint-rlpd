@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -78,6 +79,64 @@ class ColorJitterWrapper(gym.ObservationWrapper):
 
         obs['rgb'] = rgb
         return obs
+
+
+class GoalColorOverlayWrapper(gym.Wrapper):
+    """Stamps the current goal color in the top-left of each per-env render frame.
+
+    Insert between the vectorized env and RecordEpisode so the saved MP4s show
+    which color the policy was conditioned on for each parallel env. Affects only
+    ``render()``; obs/step/reward are untouched.
+    """
+
+    COLOR_NAMES = ["red", "blue", "green", "yellow", "purple", "orange"]
+    # Text colors in RGB (matches the env's rendered RGB frames).
+    TEXT_RGB = [
+        (255, 0, 0),    # red
+        (0, 80, 255),   # blue
+        (0, 255, 0),    # green
+        (255, 255, 0),  # yellow
+        (180, 0, 220),  # purple
+        (255, 140, 0),  # orange
+    ]
+
+    def render(self):
+        frames = self.env.render()
+        unwrapped = self.env.unwrapped
+        if not hasattr(unwrapped, "goal_color_idx"):
+            return frames
+
+        is_tensor = isinstance(frames, torch.Tensor)
+        np_frames = frames.cpu().numpy() if is_tensor else np.asarray(frames)
+        # Render output is (N, H, W, 3) uint8 for vector envs, (H, W, 3) for single env.
+        if np_frames.ndim == 4:
+            goal_arr = unwrapped.goal_color_idx.tolist()
+            for i in range(np_frames.shape[0]):
+                self._stamp_frame(np_frames[i], int(goal_arr[i]))
+        elif np_frames.ndim == 3:
+            idx_t = unwrapped.goal_color_idx
+            idx = int(idx_t[0].item()) if idx_t.ndim > 0 else int(idx_t.item())
+            self._stamp_frame(np_frames, idx)
+
+        if is_tensor:
+            return torch.from_numpy(np_frames).to(frames.device)
+        return np_frames
+
+    @classmethod
+    def _stamp_frame(cls, frame: np.ndarray, color_idx: int):
+        """In-place: draw 'goal: <name>' on the frame with a black outline."""
+        h, w = frame.shape[:2]
+        # Font scale that stays legible at 128x128 and 512x512 alike.
+        scale = max(0.35, w / 320.0)
+        thickness = 1 if w <= 256 else 2
+        outline = thickness + 2
+        text = f"goal: {cls.COLOR_NAMES[color_idx]}"
+        org = (5, max(12, int(14 * scale)))
+        # Outline first (black), then colored fill on top.
+        cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    (0, 0, 0), outline, cv2.LINE_AA)
+        cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    cls.TEXT_RGB[color_idx], thickness, cv2.LINE_AA)
 
 
 # ---------------------------  Extra Utils --------------------------------------#

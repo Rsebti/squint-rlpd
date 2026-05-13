@@ -624,6 +624,9 @@ if __name__ == "__main__":
         if args.evaluate:
             eval_output_dir = f"runs/{run_name}/test_videos"
         print(f"Saving eval trajectories/videos to {eval_output_dir}")
+        # Overlay the current goal color on each rendered frame before the recorder tiles them.
+        envs = utils.GoalColorOverlayWrapper(envs)
+        eval_envs = utils.GoalColorOverlayWrapper(eval_envs)
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x: (x // max_episode_steps) % args.save_train_video_freq == 0
             envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False,
