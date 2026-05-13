@@ -925,7 +925,6 @@ class Place(DefaultCameraEnv):
         reward[info["success"]] = 9
 
         # Penalties
-        reward -= 6 * info["robot_touching_table"].float()
         reward -= 3 * info["robot_touching_bin"].float()
         reward -= 1 * (~info["item_lifted"]).float()  # Encourage picking item fast
 
