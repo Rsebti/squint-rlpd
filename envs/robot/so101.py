@@ -93,11 +93,14 @@ class SO101(BaseAgent):
             normalize_action=False,
         )
 
-        # Fast movement for SO101
+        # Slower movement for SO101: arm joint delta caps halved (was ±0.1
+        # rad/step at 10 Hz = ~57 deg/s) to limit the very fast motions the
+        # previous policy was producing. Gripper delta cap unchanged so
+        # grasping still closes/opens quickly.
         pd_joint_delta_pos = PDJointPosControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.1, -0.1, -0.1, -0.1, -0.1, -0.2],
-            [0.1, 0.1, 0.1, 0.1, 0.1, 0.2],
+            [-0.05, -0.05, -0.05, -0.05, -0.05, -0.2],
+            [0.05, 0.05, 0.05, 0.05, 0.05, 0.2],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
             force_limit=100,
@@ -119,11 +122,16 @@ class SO101(BaseAgent):
             normalize_action=True
         )
 
+        # Wrap each controller in a dict with balance_passive_force=False so
+        # ManiSkill does NOT disable gravity on the robot links. The default
+        # (balance_passive_force=True) is a workaround for PhysX's lack of
+        # gravity compensation; with it on, every robot link gets
+        # disable_gravity=True, which makes the sim a poor match for Isaac.
         controller_configs = dict(
-            pd_joint_delta_pos=pd_joint_delta_pos,
-            pd_joint_pos=pd_joint_pos,
-            pd_joint_target_delta_pos=pd_joint_target_delta_pos,
-            pd_joint_vel=pd_joint_vel,
+            pd_joint_delta_pos=dict(arm=pd_joint_delta_pos, balance_passive_force=False),
+            pd_joint_pos=dict(arm=pd_joint_pos, balance_passive_force=False),
+            pd_joint_target_delta_pos=dict(arm=pd_joint_target_delta_pos, balance_passive_force=False),
+            pd_joint_vel=dict(arm=pd_joint_vel, balance_passive_force=False),
         )
         return deepcopy_dict(controller_configs)
 

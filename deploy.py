@@ -60,7 +60,7 @@ class Args:
     """Path to checkpoint file, or 'wandb' to load from wandb. If None, uses random agent."""
     env_id: str = "SO101ReachCube-v1"
     """Environment ID (must match training environment)."""
-    obs_mode: str = "rgb+segmentation"
+    obs_mode: str = "rgb"
     """Observation mode for the environment."""
     control_mode: str = "pd_joint_target_delta_pos"
     """Control mode for the robot."""

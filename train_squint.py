@@ -70,6 +70,8 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_trajectory: bool = False
     """whether to save trajectory data into the `videos` folder"""
+    save_qpos: bool = False
+    """whether to save per-step joint positions during eval to `runs/{run_name}/qpos/` (one .txt per parallel env, sampled at the env control freq of 10 Hz)"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder, and to wandb if wandb is set"""
     evaluate: bool = False
@@ -84,6 +86,8 @@ class Args:
     """adds domain randomization flag if env supports it"""
     apply_overlay: bool = False
     """if False, disables the segmentation+overlay greenscreen so the CNN sees the raw sim (table, walls, full scene)"""
+    n_distractors: int = 1
+    """for cube tasks, number of distractor cubes to spawn alongside the target (0 = single block, 1 = goal + 1 distractor, up to 5 = full palette). Distractors get unique palette colors distinct from the goal. The 6-d goal-color one-hot is always passed to the policy regardless."""
     num_envs: int = 2048
     """the number of parallel environments"""
     num_eval_envs: int = 16
@@ -102,7 +106,7 @@ class Args:
     """frequency to save training videos in terms of iterations"""
     control_mode: Optional[str] = None 
     """the control mode to use for the environment"""
-    obs_mode: Optional[str] = "rgb+segmentation"
+    obs_mode: Optional[str] = "rgb"
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"
     """the rendering mode of the environment, could be rgb or all"""
@@ -174,6 +178,17 @@ def evaluate(args, eval_envs, get_action_fn, logger, eval_output_dir, max_episod
     eval_obs, _ = eval_envs.reset()
     eval_metrics = defaultdict(list)
 
+    qpos_buffers = None
+    initial_state = None
+    if args.save_qpos:
+        qpos_buffers = [[] for _ in range(args.num_eval_envs)]
+        base_env = eval_envs.unwrapped
+        initial_state = {
+            "robot_qpos": base_env.agent.robot.get_qpos().detach().cpu().numpy(),
+            "cube_pose": base_env.item.pose.raw_pose.detach().cpu().numpy(),
+            "bin_pose": base_env.bin.pose.raw_pose.detach().cpu().numpy(),
+        }
+
     for _ in range(max_episode_steps):
         with torch.no_grad():
             eval_action = get_action_fn(eval_obs['rgb'], eval_obs['state'])
@@ -182,6 +197,36 @@ def evaluate(args, eval_envs, get_action_fn, logger, eval_output_dir, max_episod
                 mask = eval_infos["_final_info"]
                 for k, v in eval_infos["final_info"]["episode"].items():
                     eval_metrics[f'eval/{k}'].append(v[mask])
+            if qpos_buffers is not None:
+                qpos = eval_envs.unwrapped.agent.robot.get_qpos().detach().cpu().numpy()
+                for i in range(args.num_eval_envs):
+                    qpos_buffers[i].append(qpos[i])
+
+    if qpos_buffers is not None:
+        qpos_dir = os.path.join(
+            os.path.dirname(eval_output_dir),
+            "test_qpos" if args.evaluate else "qpos",
+        )
+        init_dir = os.path.join(
+            os.path.dirname(eval_output_dir),
+            "test_initial_state" if args.evaluate else "initial_state",
+        )
+        os.makedirs(qpos_dir, exist_ok=True)
+        os.makedirs(init_dir, exist_ok=True)
+        for i, traj in enumerate(qpos_buffers):
+            if not traj:
+                continue
+            np.savetxt(
+                os.path.join(qpos_dir, f"episode_{i}.txt"),
+                np.stack(traj, axis=0),
+                fmt="%.6f",
+            )
+            with open(os.path.join(init_dir, f"episode_{i}.txt"), "w") as f:
+                f.write("# robot_qpos: 6 joint positions (rad)\n")
+                f.write("# cube_pose / bin_pose: x y z qw qx qy qz\n")
+                f.write("robot_qpos " + " ".join(f"{v:.6f}" for v in initial_state["robot_qpos"][i]) + "\n")
+                f.write("cube_pose " + " ".join(f"{v:.6f}" for v in initial_state["cube_pose"][i]) + "\n")
+                f.write("bin_pose " + " ".join(f"{v:.6f}" for v in initial_state["bin_pose"][i]) + "\n")
 
     eval_d = {}
     for k, v in eval_metrics.items():
@@ -598,6 +643,9 @@ if __name__ == "__main__":
     if not args.apply_overlay:
         env_kwargs["domain_randomization_config"] = {"apply_overlay": False}
         eval_env_kwargs["domain_randomization_config"] = {"apply_overlay": False}
+    if "PlaceCube" in args.env_id:
+        env_kwargs["n_distractors"] = args.n_distractors
+        eval_env_kwargs["n_distractors"] = args.n_distractors
 
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,
                     reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)

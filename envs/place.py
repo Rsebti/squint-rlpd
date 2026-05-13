@@ -11,6 +11,7 @@ from transforms3d.euler import euler2quat
 
 import mani_skill.envs.utils.randomization as randomization
 from mani_skill.utils import common
+from mani_skill.utils.building.ground import build_ground
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.actor import Actor
@@ -43,13 +44,93 @@ NUM_COLORS = len(COLOR_PALETTE)
 SCENE_NEUTRAL_RGB = (0xB8 / 255.0, 0xAD / 255.0, 0xA9 / 255.0)
 
 
+class FlatTableSceneBuilder(TableSceneBuilder):
+    """Table with the decorative GLB visual replaced by a flat matte box.
+
+    Geometry and pose match TableSceneBuilder so downstream code (initialize,
+    robot placement, aabb) is unchanged. If ``frictions`` is provided
+    (per-env array), each env gets its own table actor with its own PhysX
+    material; otherwise a single shared kinematic table is built.
+    """
+
+    TABLE_HALF = (2.418 / 2, 1.209 / 2, 0.9196429 / 2)
+    TABLE_CENTER_Z = 0.9196429 / 2
+    INIT_POS = [-0.12, 0, -0.9196429]
+
+    def __init__(self, env, frictions=None):
+        super().__init__(env)
+        # Per-env static/dynamic friction values. None = use SAPIEN default.
+        self.frictions = frictions
+
+    def _make_render_material(self):
+        return sapien.render.RenderMaterial(
+            base_color=[*SCENE_NEUTRAL_RGB, 1.0],
+            roughness=0.85,
+            metallic=0.0,
+            specular=0.1,
+        )
+
+    def build(self):
+        if self.frictions is None:
+            # Single shared kinematic table with SAPIEN default friction.
+            builder = self.scene.create_actor_builder()
+            builder.add_box_collision(
+                pose=sapien.Pose(p=[0, 0, self.TABLE_CENTER_Z]),
+                half_size=self.TABLE_HALF,
+            )
+            builder.add_box_visual(
+                pose=sapien.Pose(p=[0, 0, self.TABLE_CENTER_Z]),
+                half_size=self.TABLE_HALF,
+                material=self._make_render_material(),
+            )
+            builder.initial_pose = sapien.Pose(
+                p=self.INIT_POS, q=euler2quat(0, 0, np.pi / 2)
+            )
+            self.table = builder.build_kinematic(name="table-workspace")
+        else:
+            # Per-env kinematic table, each with its own PhysxMaterial so we
+            # can randomize friction independently across parallel envs.
+            tables = []
+            for i in range(self.env.num_envs):
+                f = float(self.frictions[i])
+                phys_mat = sapien.pysapien.physx.PhysxMaterial(
+                    static_friction=f, dynamic_friction=f, restitution=0.0,
+                )
+                builder = self.scene.create_actor_builder()
+                builder.add_box_collision(
+                    pose=sapien.Pose(p=[0, 0, self.TABLE_CENTER_Z]),
+                    half_size=self.TABLE_HALF,
+                    material=phys_mat,
+                )
+                builder.add_box_visual(
+                    pose=sapien.Pose(p=[0, 0, self.TABLE_CENTER_Z]),
+                    half_size=self.TABLE_HALF,
+                    material=self._make_render_material(),
+                )
+                builder.initial_pose = sapien.Pose(
+                    p=self.INIT_POS, q=euler2quat(0, 0, np.pi / 2)
+                )
+                builder.set_scene_idxs([i])
+                tables.append(builder.build_kinematic(name=f"table-workspace-{i}"))
+            self.table = Actor.merge(tables, name="table-workspace")
+
+        self.table_length = 2 * self.TABLE_HALF[0]
+        self.table_width = 2 * self.TABLE_HALF[1]
+        self.table_height = 2 * self.TABLE_HALF[2]
+        floor_width = 500 if self.scene.parallel_in_single_scene else 100
+        self.ground = build_ground(
+            self.scene, floor_width=floor_width, altitude=-self.table_height
+        )
+        self.scene_objects = [self.table, self.ground]
+
+
 @dataclass
 class PlaceRandomizationConfig(DefaultRandomizationConfig):
     """Domain randomization config for Place task, extending wrist camera randomization."""
     # Noisy joint positions for better sim2real
     robot_qpos_noise_std: float = np.deg2rad(5)
     # Cube-specific randomization
-    cube_half_size_range: Sequence[float] = (0.022 / 2, 0.028 / 2)
+    cube_half_size_range: Sequence[float] = (0.018 / 2, 0.022 / 2)
     # Can-specific randomization
     can_radius_range: Sequence[float] = (0.028 / 2, 0.038 / 2)
     can_half_height_range: Sequence[float] = (0.05 / 2, 0.07 / 2)
@@ -58,8 +139,11 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     bin_half_size_y_range: Sequence[float] = (0.09 / 2, 0.11 / 2)
     bin_half_size_z_range: Sequence[float] = (0.024 / 2, 0.036 / 2)
 
-    item_friction_range: Sequence[float] = (0.1, 0.5)
-    item_density_range: Sequence[float] = (200, 200)
+    # Friction for the cubes (painted wood — can be quite slippery).
+    item_friction_range: Sequence[float] = (0.05, 0.6)
+    item_density_range: Sequence[float] = (600, 1000)
+    # Friction for the table top (plastic in the real setup → low friction).
+    table_friction_range: Sequence[float] = (0.05, 0.4)
     randomize_item_color: bool = False
 
 
@@ -88,6 +172,7 @@ class Place(DefaultCameraEnv):
         self,
         *args,
         item_type="cube",
+        n_distractors: int = 1,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
         domain_randomization_config: Union[
@@ -95,10 +180,18 @@ class Place(DefaultCameraEnv):
         ] = PlaceRandomizationConfig(),
         domain_randomization=False,
         spawn_box_pos=[0.3, 0],
-        spawn_box_half_size=0.2 / 2,
+        spawn_box_half_size=0.3 / 2,
         **kwargs,
     ):
+        if not (0 <= n_distractors <= 4):
+            # Distractors are placed face-to-face on the target's 4 cardinal
+            # faces (one per face), so the geometry caps at 4.
+            raise ValueError(
+                f"n_distractors must be in [0, 4] (cubes share faces with the target, "
+                f"which has 4 cardinal faces in xy). Got {n_distractors}."
+            )
         self.item_type = item_type
+        self.n_distractors = n_distractors
 
         # Robot-specific configuration
         if robot_uids == "so100":
@@ -144,7 +237,20 @@ class Place(DefaultCameraEnv):
         )
 
     def _load_scene(self, options: dict):
-        self.table_scene = TableSceneBuilder(self)
+        # Sample per-env table friction so each parallel env sees a different
+        # surface (matches a slippery plastic table at the low end of the range).
+        cfg = self.domain_randomization_config
+        if self.domain_randomization:
+            table_frictions = self._batched_episode_rng.uniform(
+                low=cfg.table_friction_range[0],
+                high=cfg.table_friction_range[1],
+            )
+        else:
+            table_frictions = np.ones(self.num_envs) * (
+                cfg.table_friction_range[0] + cfg.table_friction_range[1]
+            ) / 2
+        self.table_frictions = common.to_tensor(table_frictions, device=self.device)
+        self.table_scene = FlatTableSceneBuilder(self, frictions=table_frictions)
         self.table_scene.build()
         # Repaint the table, ground, and any other table-scene actors to the
         # neutral background color so the SAPIEN-rendered scene matches the
@@ -344,39 +450,46 @@ class Place(DefaultCameraEnv):
         self.bin = Actor.merge(bins, name="bin")
         self.add_to_state_dict_registry(self.bin)
 
-        # Distractor cube (cube tasks only): same size as the target, palette
-        # color sampled per episode (always different from the goal color),
-        # spawns face-to-face with the target in _initialize_episode.
-        self.distractor = None
-        if self.item_type == "cube":
-            # Placeholder color (mutated per episode). Default to blue so a
-            # non-randomized rollout shows a distinguishable distractor.
-            distractor_colors = np.tile(COLOR_PALETTE[1], (self.num_envs, 1))
-            distractor_colors = np.concatenate(
-                [distractor_colors, np.ones((self.num_envs, 1))], axis=-1
-            )
+        # Distractor cubes (cube tasks only, when n_distractors > 0): same
+        # size/physics as the target. Each distractor gets a palette color sampled
+        # per episode that is distinct from the goal and from every other
+        # distractor. They spawn on a ring around the target in
+        # _initialize_episode.
+        self.distractors: list = []
+        if self.item_type == "cube" and self.n_distractors > 0:
+            for k in range(self.n_distractors):
+                # Placeholder color (mutated per episode). Use palette index
+                # k+1 so an un-randomized rollout shows distinguishable cubes.
+                placeholder_color = COLOR_PALETTE[(k + 1) % NUM_COLORS]
+                distractor_colors_k = np.tile(placeholder_color, (self.num_envs, 1))
+                distractor_colors_k = np.concatenate(
+                    [distractor_colors_k, np.ones((self.num_envs, 1))], axis=-1
+                )
 
-            distractors = []
-            for i in range(self.num_envs):
-                builder = self.scene.create_actor_builder()
-                friction = frictions[i]
-                material = sapien.pysapien.physx.PhysxMaterial(
-                    static_friction=friction, dynamic_friction=friction, restitution=0
-                )
-                builder.add_box_collision(
-                    half_size=[half_sizes[i]] * 3, material=material, density=densities[i]
-                )
-                builder.add_box_visual(
-                    half_size=[half_sizes[i]] * 3,
-                    material=sapien.render.RenderMaterial(base_color=distractor_colors[i]),
-                )
-                # Offset initial pose so it doesn't intersect the target item or bin at creation.
-                builder.initial_pose = sapien.Pose(p=[0.25, 0.05, half_sizes[i]])
-                builder.set_scene_idxs([i])
-                distractor = builder.build(name=f"distractor-{i}")
-                distractors.append(distractor)
-                self.remove_from_state_dict_registry(distractor)
-            self.distractor = Actor.merge(distractors, name="distractor")
+                per_env_actors = []
+                for i in range(self.num_envs):
+                    builder = self.scene.create_actor_builder()
+                    friction = frictions[i]
+                    material = sapien.pysapien.physx.PhysxMaterial(
+                        static_friction=friction, dynamic_friction=friction, restitution=0
+                    )
+                    builder.add_box_collision(
+                        half_size=[half_sizes[i]] * 3, material=material, density=densities[i]
+                    )
+                    builder.add_box_visual(
+                        half_size=[half_sizes[i]] * 3,
+                        material=sapien.render.RenderMaterial(base_color=distractor_colors_k[i]),
+                    )
+                    # Offset initial pose so distractors don't intersect each
+                    # other, the target, or the bin at creation. Spread along x.
+                    builder.initial_pose = sapien.Pose(
+                        p=[0.25 + 0.04 * k, 0.05, half_sizes[i]]
+                    )
+                    builder.set_scene_idxs([i])
+                    actor = builder.build(name=f"distractor_{k}-{i}")
+                    per_env_actors.append(actor)
+                    self.remove_from_state_dict_registry(actor)
+                self.distractors.append(Actor.merge(per_env_actors, name=f"distractor_{k}"))
 
         self.bin_radius = torch.linalg.norm(self.bin_dimensions[:, :2], dim=-1)
 
@@ -385,12 +498,15 @@ class Place(DefaultCameraEnv):
             self.remove_object_from_greenscreen(self.agent.robot)
             self.remove_object_from_greenscreen(self.item)
             self.remove_object_from_greenscreen(self.bin)
-            if self.distractor is not None:
-                self.remove_object_from_greenscreen(self.distractor)
+            for d in self.distractors:
+                self.remove_object_from_greenscreen(d)
 
         # Goal-color buffers (per env). _initialize_episode populates these.
         self.goal_color_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.distractor_color_idx = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+        # Per-env distractor color indices, shape (num_envs, n_distractors).
+        self.distractor_color_idxs = torch.zeros(
+            (self.num_envs, self.n_distractors), dtype=torch.long, device=self.device
+        )
 
         # Convert rest_qpos to tensor
         self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
@@ -436,7 +552,13 @@ class Place(DefaultCameraEnv):
                     part.material.set_base_color(rgba)
 
     def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
-        """Sample goal_color_idx (honoring options) and a distractor color != goal."""
+        """Sample goal_color_idx (honoring options) and n_distractors distractor
+        colors that are all distinct from the goal and from each other.
+
+        Returns:
+            goal_idx: (b,) long tensor.
+            distractor_idxs: (b, n_distractors) long tensor.
+        """
         b = len(env_idx)
         # 1) goal color: from options if provided, else uniform over the palette.
         goal_override = options.get("goal_color_idx") if isinstance(options, dict) else None
@@ -450,11 +572,17 @@ class Place(DefaultCameraEnv):
                 assert goal_idx.numel() == b, (
                     f"goal_color_idx must be an int or length-{b} sequence, got {tuple(goal_idx.shape)}"
                 )
-        # 2) distractor color: uniform over {0..NUM_COLORS-1} \ {goal_idx}, vectorized.
-        # Trick: sample in {0..NUM_COLORS-2} then shift up by 1 wherever >= goal.
-        offset = torch.randint(NUM_COLORS - 1, (b,), device=self.device, dtype=torch.long)
-        distractor_idx = offset + (offset >= goal_idx).long()
-        return goal_idx, distractor_idx
+        # 2) distractor colors: per-env random permutation of the palette,
+        # remove the goal, take the first n_distractors entries.
+        if self.n_distractors == 0:
+            distractor_idxs = torch.empty((b, 0), dtype=torch.long, device=self.device)
+        else:
+            keys = torch.rand(b, NUM_COLORS, device=self.device)
+            perm = keys.argsort(dim=-1)  # (b, NUM_COLORS)
+            mask = perm != goal_idx.unsqueeze(1)  # exactly one False per row
+            non_goal = perm[mask].reshape(b, NUM_COLORS - 1)
+            distractor_idxs = non_goal[:, : self.n_distractors]
+        return goal_idx, distractor_idxs
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
@@ -485,45 +613,92 @@ class Place(DefaultCameraEnv):
                 bounds=region, batch_size=b, device=self.device
             )
 
-            # Item/bin radius (use max for conservative placement)
+            # Item/bin radius (use max for conservative placement).
+            # When distractors are face-to-face on the target, the cluster
+            # extends from the target center by (half_size + 2*half_size) =
+            # 3*half_size into any occupied direction. Use that as the effective
+            # radius so the bin sampler avoids the whole cluster, not just the
+            # target cube.
             if self.item_type == "can":
                 item_radius = self.item_half_radii.max().item() + 0.01
             else:
-                item_radius = self.item_half_sizes.max().item() + 0.01
+                hs = self.item_half_sizes.max().item()
+                cluster_mult = 3.0 if self.n_distractors > 0 else 1.0
+                item_radius = cluster_mult * hs + 0.01
             bin_radius = self.bin_radius.max().item() + 0.01
 
             item_xy_offset = sampler.sample(item_radius, 100)
             bin_xy_offset = sampler.sample(bin_radius, 100, verbose=False)
 
-            # Set item pose
-            item_xyz = torch.zeros((b, 3))
-            item_xyz[:, :2] = spawn_center[env_idx, :2] + item_xy_offset
-            item_xyz[:, 2] = self.item_half_sizes[env_idx]
+            # Cluster of (1 + n_distractors) cubes glued face-to-face. The
+            # sampled position is the geometric center of the cluster, so the
+            # goal cube can be ANY of the slots (center or any cardinal),
+            # uniformly random — not always the middle one.
+            cluster_xy = spawn_center[env_idx, :2] + item_xy_offset
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
-            self.item.set_pose(Pose.create_from_pq(item_xyz, qs))
+            n_d = len(self.distractors)
 
-            # Distractor: place adjacent to the target cube at a random direction.
-            # Center-to-center distance = 2 * half_size + tiny random gap so the cubes
-            # are either touching face-to-face or slightly off (0-5 mm gap).
-            if self.distractor is not None:
-                theta = torch.rand(b, device=self.device) * (2 * math.pi)
-                gap = torch.rand(b, device=self.device) * 0.005
-                distance = 2 * self.item_half_sizes[env_idx] + gap
-                distractor_xyz = item_xyz.clone()
-                distractor_xyz[:, 0] = distractor_xyz[:, 0] + distance * torch.cos(theta)
-                distractor_xyz[:, 1] = distractor_xyz[:, 1] + distance * torch.sin(theta)
-                distractor_qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
-                self.distractor.set_pose(Pose.create_from_pq(distractor_xyz, distractor_qs))
+            if n_d > 0:
+                # Pick which of the 4 cardinal directions are occupied (subset
+                # of size n_d).
+                face_keys = torch.rand(b, 4, device=self.device)
+                face_perm = face_keys.argsort(dim=-1)  # (b, 4)
+                cardinal_dirs = face_perm[:, :n_d]  # (b, n_d)
+
+                # Total slots = center + occupied cardinals. Pick the goal slot
+                # uniformly so the goal cube isn't always at the center.
+                total_slots = n_d + 1
+                goal_slot = torch.randint(total_slots, (b,), device=self.device, dtype=torch.long)
+
+                # Per-slot xy offsets relative to cluster center.
+                # slot 0 = center (offset 0); slot k+1 = 2*half_size in
+                # direction theta_target + cardinal_dirs[:,k]*pi/2.
+                theta_target = 2.0 * torch.atan2(qs[:, 3], qs[:, 0])  # (b,)
+                distance = 2 * self.item_half_sizes[env_idx]  # (b,) face-to-face
+                slot_offsets = torch.zeros(b, total_slots, 2, device=self.device)
+                for k in range(n_d):
+                    face_k = cardinal_dirs[:, k].float() * (math.pi / 2)
+                    theta_face = theta_target + face_k
+                    slot_offsets[:, k + 1, 0] = distance * torch.cos(theta_face)
+                    slot_offsets[:, k + 1, 1] = distance * torch.sin(theta_face)
+
+                arange_b = torch.arange(b, device=self.device)
+
+                # Goal cube at chosen slot.
+                item_xyz = torch.zeros((b, 3))
+                item_xyz[:, :2] = cluster_xy + slot_offsets[arange_b, goal_slot]
+                item_xyz[:, 2] = self.item_half_sizes[env_idx]
+                self.item.set_pose(Pose.create_from_pq(item_xyz, qs))
+
+                # Distractors at the remaining slots, faces flush with the
+                # cluster (orientation shared with the target).
+                slots_all = torch.arange(total_slots, device=self.device).unsqueeze(0).expand(b, total_slots)
+                mask = slots_all != goal_slot.unsqueeze(1)  # exactly one False per row
+                non_goal_slots = slots_all[mask].reshape(b, n_d)
+                for k, d_actor in enumerate(self.distractors):
+                    slot_k = non_goal_slots[:, k]
+                    d_offset = slot_offsets[arange_b, slot_k]
+                    d_xyz = torch.zeros((b, 3))
+                    d_xyz[:, :2] = cluster_xy + d_offset
+                    d_xyz[:, 2] = self.item_half_sizes[env_idx]
+                    d_actor.set_pose(Pose.create_from_pq(d_xyz, qs))
+            else:
+                # No distractors: goal alone at the sampled position.
+                item_xyz = torch.zeros((b, 3))
+                item_xyz[:, :2] = cluster_xy
+                item_xyz[:, 2] = self.item_half_sizes[env_idx]
+                self.item.set_pose(Pose.create_from_pq(item_xyz, qs))
 
             # Goal-conditioned colors: sample new indices, paint the cubes, and
             # cache the indices for the obs vector (one-hot goal color).
             if self.item_type == "cube":
-                goal_idx, distractor_idx = self._sample_goal_and_distractor_colors(env_idx, options)
+                goal_idx, distractor_idxs = self._sample_goal_and_distractor_colors(env_idx, options)
                 self.goal_color_idx[env_idx] = goal_idx
-                if self.distractor is not None:
-                    self.distractor_color_idx[env_idx] = distractor_idx
                 self._set_actor_palette_color(self.item, env_idx, goal_idx)
-                self._set_actor_palette_color(self.distractor, env_idx, distractor_idx)
+                if n_d > 0:
+                    self.distractor_color_idxs[env_idx] = distractor_idxs
+                    for k, d_actor in enumerate(self.distractors):
+                        self._set_actor_palette_color(d_actor, env_idx, distractor_idxs[:, k])
 
             # Set bin pose
             bin_xyz = torch.zeros((b, 3))
@@ -681,7 +856,7 @@ class Place(DefaultCameraEnv):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 9
 
 
-@register_env("SO101PlaceCube-v1", max_episode_steps=50)
+@register_env("SO101PlaceCube-v1", max_episode_steps=75)
 class PlaceCube(Place):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)
