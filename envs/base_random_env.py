@@ -190,6 +190,44 @@ class BaseRandomEnv(BaseEnv):
         builder.initial_pose = sapien.Pose()
         self.wrist_camera_mount = builder.build_kinematic("wrist_camera_mount")
 
+    def _recolor_entities_to(self, entities, rgb):
+        """Mutate every render-shape base_color on `entities` to ``rgb`` (RGB in [0,1]).
+
+        Mirrors the pattern used by _randomize_robot_color but for non-articulated
+        scene actors (table, ground, walls). Pass the result of e.g.
+        ``self.table_scene.scene_objects`` to repaint the workspace to match the
+        greenscreen background color.
+        """
+        rgba = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0]
+        for obj in entities:
+            sub_entities = []
+            if hasattr(obj, "_objs"):
+                # ManiSkill managed Actor: one underlying entity per sub-scene.
+                for sub in obj._objs:
+                    sub_entities.append(getattr(sub, "entity", sub))
+            else:
+                sub_entities.append(getattr(obj, "entity", obj))
+            for entity in sub_entities:
+                comp = entity.find_component_by_type(RenderBodyComponent)
+                if comp is None:
+                    continue
+                for render_shape in comp.render_shapes:
+                    for part in render_shape.parts:
+                        # Replace flat base color AND clear the diffuse texture --
+                        # PBR multiplies texture * base_color, so without clearing
+                        # the texture (e.g. the table's wood) keeps showing.
+                        part.material.set_base_color(rgba)
+                        if hasattr(part.material, "set_base_color_texture"):
+                            try:
+                                part.material.set_base_color_texture(None)
+                            except Exception:
+                                pass
+                        if hasattr(part.material, "set_diffuse_texture"):
+                            try:
+                                part.material.set_diffuse_texture(None)
+                            except Exception:
+                                pass
+
     def _randomize_robot_color(self):
         """Apply robot color randomization if configured."""
         if self.domain_randomization_config.robot_color is None:

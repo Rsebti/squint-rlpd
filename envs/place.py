@@ -37,6 +37,11 @@ COLOR_PALETTE = np.array(
 )
 NUM_COLORS = len(COLOR_PALETTE)
 
+# Background color applied to the table, ground plane, and other non-foreground
+# scene actors. Matches the #B8ADA9 overlay PNG so SAPIEN-rendered frames blend
+# with the greenscreen background that the policy was trained on.
+SCENE_NEUTRAL_RGB = (0xB8 / 255.0, 0xAD / 255.0, 0xA9 / 255.0)
+
 
 @dataclass
 class PlaceRandomizationConfig(DefaultRandomizationConfig):
@@ -141,6 +146,12 @@ class Place(DefaultCameraEnv):
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
+        # Repaint the table, ground, and any other table-scene actors to the
+        # neutral background color so the SAPIEN-rendered scene matches the
+        # greenscreen overlay even before the overlay is applied. The cubes,
+        # bin, robot, and goal_site are built afterwards and keep their own
+        # materials.
+        self._recolor_entities_to(self.table_scene.scene_objects, SCENE_NEUTRAL_RGB)
 
         if self.item_type not in ["cube", "can"]:
             raise NotImplementedError(f"Unknown item_type: {self.item_type}")
