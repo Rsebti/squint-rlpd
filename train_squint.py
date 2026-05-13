@@ -82,7 +82,9 @@ class Args:
     """the id of the environment"""
     env_domain_randomization: bool = True
     """adds domain randomization flag if env supports it"""
-    num_envs: int = 1024
+    apply_overlay: bool = False
+    """if False, disables the segmentation+overlay greenscreen so the CNN sees the raw sim (table, walls, full scene)"""
+    num_envs: int = 2048
     """the number of parallel environments"""
     num_eval_envs: int = 16
     """the number of parallel evaluation environments"""
@@ -207,14 +209,21 @@ def evaluate(args, eval_envs, get_action_fn, logger, eval_output_dir, max_episod
 #  Network Modules
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _orthogonal_via_cpu(weight, gain=1.0):
+    # SAPIEN's CUDA init corrupts cuSOLVER state on Blackwell, segfaulting
+    # nn.init.orthogonal_ on GPU tensors. Init on CPU and copy back.
+    w_cpu = torch.empty_like(weight, device='cpu')
+    nn.init.orthogonal_(w_cpu, gain)
+    weight.copy_(w_cpu)
+
+
 def weight_init(m):
     if isinstance(m, nn.Linear):
-        nn.init.orthogonal_(m.weight.data)
+        _orthogonal_via_cpu(m.weight.data)
         if hasattr(m.bias, 'data'):
             m.bias.data.fill_(0.0)
     elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-        gain = nn.init.calculate_gain('relu')
-        nn.init.orthogonal_(m.weight.data, gain)
+        _orthogonal_via_cpu(m.weight.data, nn.init.calculate_gain('relu'))
         if hasattr(m.bias, 'data'):
             m.bias.data.fill_(0.0)
 
@@ -586,6 +595,9 @@ if __name__ == "__main__":
     if args.env_domain_randomization:
         env_kwargs["domain_randomization"] = True
         eval_env_kwargs["domain_randomization"] = True
+    if not args.apply_overlay:
+        env_kwargs["domain_randomization_config"] = {"apply_overlay": False}
+        eval_env_kwargs["domain_randomization_config"] = {"apply_overlay": False}
 
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,
                     reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)

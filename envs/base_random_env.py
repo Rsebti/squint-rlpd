@@ -56,7 +56,7 @@ class RandomizationConfig:
     """Noise scale for initial robot joint positions."""
     apply_overlay: bool = True
     """Whether to apply background overlay (greenscreen). If False, returns raw simulation images."""
-    rgb_overlay_path: Optional[str] = os.path.join(os.path.dirname(__file__), "black_overlay.png")
+    rgb_overlay_path: Optional[str] = os.path.join(os.path.dirname(__file__), "b8ada9_overlay.png")
     """Path to background image. If None and apply_overlay=True, uses black background."""
 
     # === Common randomization settings (affected by domain_randomization flag) ===
@@ -64,7 +64,7 @@ class RandomizationConfig:
     """Range for gripper joint stiffness randomization (per-episode)."""
     gripper_damping_range: Sequence[float] = (50, 200)
     """Range for gripper joint damping randomization (per-episode)."""
-    robot_color: Optional[Union[str, Sequence[float]]] = None
+    robot_color: Optional[Union[str, Sequence[float]]] = (0.0, 0.0, 0.0)
     """Robot color in RGB (0-1). Set to "random" for per-episode randomization."""
     randomize_lighting: bool = True
     """Whether to randomize ambient lighting."""

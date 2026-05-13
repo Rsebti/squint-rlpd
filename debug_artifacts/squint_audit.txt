@@ -1,0 +1,205 @@
+[audit] Settling physics for 5 steps...
+
+==========================================================================================
+  FULL MANISKILL AUDIT  env=SO101PlaceCube-v1  apply_overlay=True
+==========================================================================================
+
+------------------------------------------------------------------------------------------
+  1. SIM CONFIG
+------------------------------------------------------------------------------------------
+  sim_freq       = 100
+  control_freq   = 10
+  control_mode   = pd_joint_target_delta_pos
+  obs_mode       = rgb+segmentation
+  gravity        = (0.0, 0.0, -9.81)
+  action_space   = Box(-1.0, 1.0, (6,), float32)
+    high = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    low  = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+
+------------------------------------------------------------------------------------------
+  2. ROBOT
+------------------------------------------------------------------------------------------
+
+[joint count] 6
+[joint names] ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper']
+
+[joints -- qpos / qvel / hard limits]
+  [0] shoulder_pan          qpos=  +0.0308 rad (   +1.77 deg)  qvel=  +0.0000  hard=[-1.920, +1.920]
+  [1] shoulder_lift         qpos=  -0.0059 rad (   -0.34 deg)  qvel=  +0.0000  hard=[-1.745, +1.745]
+  [2] elbow_flex            qpos=  -0.0436 rad (   -2.50 deg)  qvel=  +0.0000  hard=[-1.690, +1.690]
+  [3] wrist_flex            qpos=  +1.5822 rad (  +90.65 deg)  qvel=  +0.0000  hard=[-1.658, +1.658]
+  [4] wrist_roll            qpos=  -1.5925 rad (  -91.24 deg)  qvel=  +0.0000  hard=[-2.744, +2.841]
+  [5] gripper               qpos=  +1.0192 rad (  +58.40 deg)  qvel=  +0.0000  hard=[-0.175, +2.094]
+
+[controller info]
+  active controller = PDJointPosController
+    stiffness          = [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+    damping            = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+    force_limit        = 100
+    lower              = [-0.1, -0.1, -0.1, -0.1, -0.1, -0.2]
+    upper              = [0.1, 0.1, 0.1, 0.1, 0.1, 0.2]
+    use_delta          = True
+    use_target         = True
+    normalize_action   = True
+
+[robot world pose]
+  pos_w = (+0.0000, +0.0000, +0.0000)
+  quat_w = (w=+1.0000, x=+0.0000, y=+0.0000, z=+0.0000)   (Hamilton w,x,y,z)
+
+[bodies / links -- world pose + local axes in world]
+  base_link                     
+        pos_w  = (+0.0000, +0.0000, +0.0000)
+        quat_w = (w=+1.0000, x=+0.0000, y=+0.0000, z=+0.0000)
+        local +X -> world (+1.000, +0.000, +0.000)    local +Y -> world (+0.000, +1.000, +0.000)    local +Z -> world (+0.000, +0.000, +1.000)
+  shoulder_link                 
+        pos_w  = (+0.0388, +0.0000, +0.0624)
+        quat_w = (w=-0.0000, x=+0.0154, y=+0.9999, z=+0.0000)
+        local +X -> world (-1.000, +0.031, +0.000)    local +Y -> world (+0.031, +1.000, +0.000)    local +Z -> world (-0.000, +0.000, -1.000)
+  upper_arm_link                
+        pos_w  = (+0.0687, -0.0192, +0.1166)
+        quat_w = (w=-0.5091, x=+0.4937, y=-0.5062, z=-0.4907)
+        local +X -> world (+0.006, -0.000, -1.000)    local +Y -> world (-1.000, +0.031, -0.006)    local +Z -> world (+0.031, +1.000, +0.000)
+  lower_arm_link                
+        pos_w  = (+0.0960, -0.0200, +0.2293)
+        quat_w = (w=-0.0284, x=+0.0066, y=-0.7071, z=-0.7065)
+        local +X -> world (-0.998, +0.031, -0.049)    local +Y -> world (-0.049, +0.002, +0.999)    local +Z -> world (+0.031, +1.000, +0.000)
+  wrist_link                    
+        pos_w  = (+0.2304, -0.0242, +0.2412)
+        quat_w = (w=-0.0244, x=+0.0026, y=-0.7071, z=-0.7067)
+        local +X -> world (-0.999, +0.031, -0.038)    local +Y -> world (-0.038, +0.001, +0.999)    local +Z -> world (+0.031, +1.000, +0.000)
+  gripper_link                  
+        pos_w  = (+0.2333, -0.0062, +0.1801)
+        quat_w = (w=+0.6703, x=+0.0137, y=-0.0132, z=-0.7418)
+        local +X -> world (-0.101, -0.995, -0.003)    local +Y -> world (+0.994, -0.101, +0.038)    local +Z -> world (-0.038, +0.001, +0.999)
+  gripper_frame_link            
+        pos_w  = (+0.2376, +0.0016, +0.0821)
+        quat_w = (w=+0.0132, x=+0.7418, y=+0.6703, z=+0.0137)
+        local +X -> world (+0.101, +0.995, +0.003)    local +Y -> world (+0.994, -0.101, +0.038)    local +Z -> world (+0.038, -0.001, -0.999)
+  moving_jaw_so101_v1_link      
+        pos_w  = (+0.2508, -0.0282, +0.1574)
+        quat_w = (w=+0.6566, x=+0.1618, y=-0.7020, z=-0.2233)
+        local +X -> world (-0.085, -0.520, +0.850)    local +Y -> world (+0.066, +0.848, +0.526)    local +Z -> world (-0.994, +0.101, -0.038)
+  finger1_tip                   
+        pos_w  = (+0.2370, -0.0043, +0.0882)
+        quat_w = (w=+0.6703, x=+0.0137, y=-0.0132, z=-0.7418)
+        local +X -> world (-0.101, -0.995, -0.003)    local +Y -> world (+0.994, -0.101, +0.038)    local +Z -> world (-0.038, +0.001, +0.999)
+  finger2_tip                   
+        pos_w  = (+0.2267, -0.0863, +0.1077)
+        quat_w = (w=+0.6566, x=+0.1618, y=-0.7020, z=-0.2233)
+        local +X -> world (-0.085, -0.520, +0.850)    local +Y -> world (+0.066, +0.848, +0.526)    local +Z -> world (-0.994, +0.101, -0.038)
+
+------------------------------------------------------------------------------------------
+  3. CUBE + BIN
+------------------------------------------------------------------------------------------
+  cube/item           pos_w = (+0.2045, -0.0662, +0.0125)    quat_w = (w=+0.5401, x=-0.0000, y=+0.0000, z=-0.8416)
+  bin                 pos_w = (+0.3395, +0.0600, +0.0000)    quat_w = (w=+0.9229, x=-0.0000, y=+0.0000, z=-0.3851)
+  item_half_sizes      = (0.012500000186264515,)
+  bin_dimensions       = (0.03999999910593033, 0.05000000074505806, 0.014999999664723873)
+  bin_thickness        = 0.005
+  spawn_box_pos        = [0.3, 0]
+  spawn_box_half_size  = 0.1
+
+------------------------------------------------------------------------------------------
+  4. WRIST CAMERA
+------------------------------------------------------------------------------------------
+
+  [base_camera]
+    width      = 128
+    height     = 128
+    fov        = 1.239183768915974
+    near       = 0.01
+    far        = 100
+
+  [wrist_camera_mount -- world pose]
+    pos_w  = (+0.2855, -0.0064, +0.1230)
+    quat_w = (w=+0.4760, x=+0.0489, y=+0.8780, z=-0.0151)
+    local +X -> world (-0.542, +0.072, -0.837)
+    local -X -> world (+0.542, -0.072, +0.837)
+    local +Y -> world (+0.100, +0.995, +0.020)
+    local -Y -> world (-0.100, -0.995, -0.020)
+    local +Z -> world (+0.834, -0.073, -0.546)
+    local -Z -> world (-0.834, +0.073, +0.546)
+    optical-axis ground projection (z=0):
+      local -Z (OpenGL/SAPIEN render cam): fwd=(-0.834, +0.073, +0.546)  (does not point down)
+      local +X (some SAPIEN camera frames): fwd=(-0.542, +0.072, -0.837)  hit=(+0.206, +0.004, +0.000)
+
+------------------------------------------------------------------------------------------
+  5. KEY DISTANCES
+------------------------------------------------------------------------------------------
+  gripper_link -> item  distance = 0.1804 m  (dxyz = (-0.029, -0.060, -0.168))
+  gripper_link -> bin   distance = 0.2194 m  (dxyz = (+0.106, +0.066, -0.180))
+
+------------------------------------------------------------------------------------------
+  6. JOINT AXIS PROBE
+  +0.1 normalized action on ONE joint at a time x 10 control-steps.
+  Reveals which world-direction each joint moves the end-effector.
+------------------------------------------------------------------------------------------
+  Tip link = moving_jaw_so101_v1_link
+  joint[0] shoulder_pan          action=+0.1 x 10  delta_tip = (-0.0036, -0.0198, +0.0000)  |delta|=0.0201
+  joint[1] shoulder_lift         action=+0.1 x 10  delta_tip = (+0.0030, -0.0001, -0.0173)  |delta|=0.0176
+  joint[2] elbow_flex            action=+0.1 x 10  delta_tip = (-0.0074, +0.0002, -0.0143)  |delta|=0.0161
+  joint[3] wrist_flex            action=+0.1 x 10  delta_tip = (-0.0064, +0.0002, -0.0013)  |delta|=0.0065
+  joint[4] wrist_roll            action=+0.1 x 10  delta_tip = (+0.0020, +0.0017, +0.0001)  |delta|=0.0026
+  joint[5] gripper               action=+0.1 x 10  delta_tip = (+0.0000, -0.0000, +0.0000)  |delta|=0.0000
+
+------------------------------------------------------------------------------------------
+  7. CONTROLLER TARGET PROBE (action -> target_qpos delta)
+------------------------------------------------------------------------------------------
+  qpos        @ reset = (0.03081992082297802, -0.005868577864021063, -0.04357578605413437, 1.582165002822876, -1.59248685836792, 1.0192257165908813)
+  target_qpos @ reset = (0.03081992082297802, -0.005868577864021063, -0.04357578605413437, 1.582165002822876, -1.59248685836792, 1.0192257165908813)
+  target - qpos       = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)   (should be ~0 right after reset)
+
+  Per-joint single-step probe (+0.1 normalized, 1 control step):
+    expected scaling: arm joints +-0.1 rad/step, gripper +-0.2 rad/step
+    joint[0] shoulder_pan          delta_target = ['+0.0100', '+0.0000', '+0.0000', '+0.0000', '+0.0000', '+0.0000']
+    joint[1] shoulder_lift         delta_target = ['+0.0000', '+0.0100', '+0.0000', '+0.0000', '+0.0000', '+0.0000']
+    joint[2] elbow_flex            delta_target = ['+0.0000', '+0.0000', '+0.0100', '+0.0000', '+0.0000', '+0.0000']
+    joint[3] wrist_flex            delta_target = ['+0.0000', '+0.0000', '+0.0000', '+0.0100', '+0.0000', '+0.0000']
+    joint[4] wrist_roll            delta_target = ['+0.0000', '+0.0000', '+0.0000', '+0.0000', '+0.0100', '+0.0000']
+    joint[5] gripper               delta_target = ['+0.0000', '+0.0000', '+0.0000', '+0.0000', '+0.0000', '+0.0200']
+
+------------------------------------------------------------------------------------------
+  8. STATE VECTOR (post FlattenRGBDObservationWrapper)
+------------------------------------------------------------------------------------------
+  obs['state'].shape = (1, 12), dtype = torch.float32
+  obs['rgb'].shape = (1, 128, 128, 3), dtype = torch.uint8
+
+  obs['state'] length = 12
+  values (full):  ['+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192', '+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192']
+
+  Expected layout: [noisy_qpos(6), controller_target_qpos(6)]
+    state[0:6]   (noisy_qpos)    = ['+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192']
+    state[6:12]  (target_qpos)   = ['+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192']
+    actual qpos (no noise)       = ['+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192']
+
+------------------------------------------------------------------------------------------
+  9. RGB IMAGE STATS / DUMP
+------------------------------------------------------------------------------------------
+  raw rgb shape = (128, 128, 3), dtype = uint8
+  raw rgb min/mean/max = 0 / 156.96 / 231
+  raw rgb mean per channel = R:168.54  G:152.92  B:149.43
+  downsampled (16x16, mode='area') min/mean/max = 0 / 156.89 / 231
+  downsampled mean per channel = R:168.46  G:152.85  B:149.36
+  dumped to /tmp/squint_rgb_{128,16}.{npy,png}
+
+------------------------------------------------------------------------------------------
+ 10. POLICY INFERENCE on initial obs
+------------------------------------------------------------------------------------------
+  checkpoint = runs/placecube_b8ada9_run1/ckpt.pt
+  global_step = 1500160
+  encoder.repr_dim = 1024
+  actor.action_scale = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  actor.action_bias  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  state input (len=12) = ['+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192', '+0.0308', '-0.0059', '-0.0436', '+1.5822', '-1.5925', '+1.0192']
+  rgb input mean RGB = R:168.46  G:152.85  B:149.36
+  feats[:8] = [0.0, 0.0, 0.0, 0.4611751437187195, 0.0, 0.0, 0.1357293725013733, 0.6820191740989685]
+  ACTION (deterministic, on initial obs) = ['-0.124406', '+0.997067', '-0.524387', '-0.977394', '+0.972235', '-0.999076']
+
+  >>> The Isaac side should reproduce this exact action vector when fed
+  >>> the same checkpoint, same 16x16 rgb (saved to squint_rgb_16.npy),
+  >>> and same 12-d state. Differences localize where the mismatch is.
+
+==========================================================================================
+  END AUDIT
+==========================================================================================
+

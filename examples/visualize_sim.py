@@ -33,10 +33,7 @@ import mani_skill.envs
 CONFIG = {
     # Tasks to visualize
     'tasks': [
-        'SO101ReachCube-v1', 'SO101ReachCan-v1',
-        'SO101LiftCube-v1', 'SO101LiftCan-v1',
-        'SO101PlaceCube-v1', 'SO101PlaceCan-v1',
-        'SO101StackCube-v1', 'SO101StackCan-v1',
+        'SO101PlaceCube-v1',
     ],
 
     # Environment settings
@@ -52,7 +49,7 @@ CONFIG = {
 
     # Visualization settings
     'window_size': 512,
-    'steps_per_task': 30,
+    'steps_per_task': 300,
     'reset_interval': 10,
 }
 

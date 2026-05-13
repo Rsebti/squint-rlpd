@@ -6,10 +6,10 @@ dependencies:
   - pip
   - pip:
     # Core ML
-    - torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-    - torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
-    - tensordict==0.7.2
-    - torchrl==0.7.2
+    - torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+    - torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+    - tensordict==0.8.3
+    - torchrl==0.8.1
 
     # Environment
     - mani_skill_nightly
