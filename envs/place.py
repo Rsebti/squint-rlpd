@@ -1,3 +1,4 @@
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Optional, Sequence, Union
 
@@ -313,13 +314,54 @@ class Place(DefaultCameraEnv):
         self.bin = Actor.merge(bins, name="bin")
         self.add_to_state_dict_registry(self.bin)
 
+        # Distractor cube (cube tasks only): same size as the target, non-red color,
+        # spawns face-to-face with the target in _initialize_episode.
+        self.distractor = None
+        if self.item_type == "cube":
+            distractor_colors = np.zeros((self.num_envs, 3))
+            # Default (no domain randomization): solid blue so it never collides with the red target.
+            distractor_colors[:, 2] = 1.0
+            if self.domain_randomization and cfg.randomize_item_color:
+                # Sample any RGB but clamp the red channel so the distractor never
+                # looks red-dominant (target is pure red).
+                distractor_rgb = self._batched_episode_rng.uniform(low=0, high=1, size=(3,))
+                distractor_rgb[:, 0] *= 0.5
+                distractor_colors = distractor_rgb
+            distractor_colors = np.concatenate(
+                [distractor_colors, np.ones((self.num_envs, 1))], axis=-1
+            )
+
+            distractors = []
+            for i in range(self.num_envs):
+                builder = self.scene.create_actor_builder()
+                friction = frictions[i]
+                material = sapien.pysapien.physx.PhysxMaterial(
+                    static_friction=friction, dynamic_friction=friction, restitution=0
+                )
+                builder.add_box_collision(
+                    half_size=[half_sizes[i]] * 3, material=material, density=densities[i]
+                )
+                builder.add_box_visual(
+                    half_size=[half_sizes[i]] * 3,
+                    material=sapien.render.RenderMaterial(base_color=distractor_colors[i]),
+                )
+                # Offset initial pose so it doesn't intersect the target item or bin at creation.
+                builder.initial_pose = sapien.Pose(p=[0.25, 0.05, half_sizes[i]])
+                builder.set_scene_idxs([i])
+                distractor = builder.build(name=f"distractor-{i}")
+                distractors.append(distractor)
+                self.remove_from_state_dict_registry(distractor)
+            self.distractor = Actor.merge(distractors, name="distractor")
+
         self.bin_radius = torch.linalg.norm(self.bin_dimensions[:, :2], dim=-1)
 
-        # Set up greenscreening - keep robot, item, and bin visible
+        # Set up greenscreening - keep robot, item, bin, and distractor visible
         if self.apply_greenscreen:
             self.remove_object_from_greenscreen(self.agent.robot)
             self.remove_object_from_greenscreen(self.item)
             self.remove_object_from_greenscreen(self.bin)
+            if self.distractor is not None:
+                self.remove_object_from_greenscreen(self.distractor)
 
         # Convert rest_qpos to tensor
         self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
@@ -389,6 +431,19 @@ class Place(DefaultCameraEnv):
             item_xyz[:, 2] = self.item_half_sizes[env_idx]
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             self.item.set_pose(Pose.create_from_pq(item_xyz, qs))
+
+            # Distractor: place adjacent to the target cube at a random direction.
+            # Center-to-center distance = 2 * half_size + tiny random gap so the cubes
+            # are either touching face-to-face or slightly off (0-5 mm gap).
+            if self.distractor is not None:
+                theta = torch.rand(b, device=self.device) * (2 * math.pi)
+                gap = torch.rand(b, device=self.device) * 0.005
+                distance = 2 * self.item_half_sizes[env_idx] + gap
+                distractor_xyz = item_xyz.clone()
+                distractor_xyz[:, 0] = distractor_xyz[:, 0] + distance * torch.cos(theta)
+                distractor_xyz[:, 1] = distractor_xyz[:, 1] + distance * torch.sin(theta)
+                distractor_qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
+                self.distractor.set_pose(Pose.create_from_pq(distractor_xyz, distractor_qs))
 
             # Set bin pose
             bin_xyz = torch.zeros((b, 3))

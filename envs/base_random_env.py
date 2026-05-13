@@ -164,7 +164,10 @@ class BaseRandomEnv(BaseEnv):
     def _load_lighting(self, options: dict):
         """Load scene lighting with optional randomization."""
         if self.domain_randomization and self.domain_randomization_config.randomize_lighting:
-            ambient_colors = self._batched_episode_rng.uniform(0.2, 0.5, size=(3,))
+            # Randomize brightness only, not hue: keeps the white bin looking white/grey
+            # across episodes instead of picking up a per-channel color tint.
+            ambient_intensity = self._batched_episode_rng.uniform(0.2, 0.5, size=(1,))
+            ambient_colors = np.repeat(ambient_intensity, 3, axis=-1)
             for i, scene in enumerate(self.scene.sub_scenes):
                 scene.render_system.ambient_light = ambient_colors[i]
         else:
