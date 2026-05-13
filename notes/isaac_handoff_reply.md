@@ -342,4 +342,95 @@ Deploy-time checkpoint surgery: only `ckpt['encoder']` and `ckpt['actor']` are l
 
 ---
 
+## Part 3 — Verification checklist (cross-env audit list)
+
+A flat list of every dimension on which the two envs can silently diverge. Sweep these in order when re-tuning parity. Items marked **★** are the ones we already know are wrong or have changed since the original handoff.
+
+### Physics / scene
+- friction coefficients (gripper jaws + tips have material override: μ_s=μ_d=2.0, restitution=0; patch_radius=0.1)
+- contact detectors
+- mass & inertias (cube 4.5 g, hard-bounded [3, 6] g; bin dynamic; distractor)
+- controls: max limits / damping or stiffness
+- simulation frequency (`sim.dt=0.01`, decimation=10 ⇒ 10 Hz policy)
+- simulation specifics for contact between two bodies (impact gripping)
+- **★ gravity ON for robot links** (`balance_passive_force=False`; Isaac side had `disable_gravity=True` — must be off)
+- contact / rest offset in PhysX (governs whether jaws ever actually touch the cube)
+- patch radius / min_patch_radius for stable grasp contact
+- PhysX solver iterations (position / velocity)
+- joint-level damping / armature / friction in URDF (separate from PD controller damping)
+- self-collision filtering between adjacent robot links
+- URDF→USD conversion quality (convex decomposition of jaws — concave grasp pocket can collapse to a hull)
+- collision mesh vs visual mesh for cube / bin (cube must be box-collider; bin must be 5 separate convex parts or a CoACD decomp, not a single hull)
+- restitution on cube + bin (must be 0 for stable settle)
+- **★ PhysX friction combine mode = MIN** (Isaac Lab default may be multiply/average)
+
+### Robot
+- initial joint positions = `start` keyframe, not `rest` (`[0, 0, 0, π/2, -π/2, 60°]`)
+- 6-DoF active (5 arm + 1 gripper); gripper joint is the LAST index in qpos
+- **★ arm delta cap ±0.05 / step**, gripper delta cap ±0.2 / step
+- PD stiffness=1000, damping=100 ⇒ overdamped (ζ≈15.8), no overshoot
+- `pd_joint_target_delta_pos` = target tracking (`use_target=True`), not direct delta from current qpos
+- **★ no soft-limit clipping on integrated target** (your `clamp` is stricter than ours)
+- force_limit=100
+
+### Camera (wrist)
+- camera extrinsics and intrinsics
+- **★ declared FOV 71° vs effective ~47° on Isaac side** — recompute focal_length / horizontal_aperture
+- camera resolution 128×128 native, downsampled to 16×16 **area mode** (not bilinear)
+- color order (RGB)
+- pixel range [0, 255] uint8 vs normalized (we send uint8; CNN does `x/255 - 0.5` internally)
+
+### Scene / world
+- initial cube positions: must be equally represented across the table region (no policy preferences)
+- initial bowl position: same
+- distractor cube existence + spawn region (n_distractors=1 default, face-to-face with target)
+- goal color one-hot encoding (which color index → which RGB; order is load-bearing)
+- cube color set (exact RGB values, same set used during training)
+- environment: lighting, reflection
+- table neutral-grey recolor `(0xB8, 0xAD, 0xA9)` (drives the warm-tint mismatch in your audit)
+- background / table texture randomization (if any)
+- wrist camera offset relative to last link (transform from URDF mount → USD)
+
+### Reward
+- reward design: no major reward, all should be more or less equal, otherwise it means the reward is irrelevant, keep it simple
+- **★ boolean OVERWRITE branching, not additive sum** (one big custom Python function, not multiple `RewardTermCfg`s)
+- **★ reward divided by 9** before being returned (`reward_mode="normalized_dense"`)
+- penalty magnitudes: −6 table contact, −3 wrong-bin contact, −1 not-lifted
+- success hard-sets reward to 9 (and overwrites all branches)
+
+### Termination / episode
+- success criterion: L∞ box check + robot static + ¬touching item + ¬touching bin
+- `is_static` excludes the gripper joint (`qvel[:, :-1]`), threshold 0.15 rad/s, L∞ (max) not L2
+- `ignore_terminations=True`, `bootstrap_at_done='always'`
+- **★ episode length 75 for PlaceCube** (was 50; PlaceCan still 50)
+- truncation vs termination distinction (no auto-reset on success)
+
+### Observation
+- 18-d state vector: `[noisy_qpos(6), controller_target_qpos(6), goal_color_one_hot(6)]` — dict-iteration order load-bearing
+- qpos noise: **reset-time** `σ=0.02` rad/joint AND **obs-time** `σ=deg2rad(5)≈0.0873` rad/joint (only on `noisy_qpos`, controller and physics qpos stay clean)
+- `controller_target_qpos` = last commanded target (target-tracking controller), not zeros
+- image normalization (raw uint8 in → CNN normalizes internally)
+
+### Training
+- image preprocessing: 128→16 square area-mode downsample, uint8
+- CNN pass (no freezing; gradients flow from critic optimizer)
+- episode length (75)
+- total training length (1.5e6 timesteps)
+- learning rates (`policy_lr = q_lr = alpha_lr = 3e-4`, Adam, no weight decay)
+- parallel envs (2048)
+- batch (replay sample 512; 256 gradient updates per env-step block)
+- **★ algorithm = SAC + distributional C51, NOT PPO**
+- **★ 101 atoms, v_min=−20, v_max=20**, gamma=0.9, tau=0.01
+- symmetric actor-critic (no privileged obs; same 18-d state seen by both)
+- 2 critics, **mean-reduced** for target (not min)
+- network shapes: CNN(3→32 k4s2 → 32→64 k4s1) → flatten 1024 → Proj 50‖256 = 306; actor 3×(256+LN+ReLU)+fc_mean(6)+fc_logstd(6); critic 312→512→512→512→101
+- orthogonal init (gain=1 Linear, √2 Conv2d); CPU init path to dodge Blackwell cuSOLVER bug
+- replay buffer 1e6; learning_starts=5000; `policy_frequency=4`; `target_network_frequency=1`
+- SAC entropy autotune: `target_entropy=-6`, `log_alpha` init=0
+- action squashing: state-dependent log_std (NOT scalar), tanh-squash, log_std clamped to [-5, +2]
+- domain randomization scope (cube size, cube mass, cube friction, table friction, bin pose, distractor presence + color, robot color, lighting, wrist FOV/pos/rot)
+- random seed handling per env
+
+---
+
 *Anything in this doc that references training-time setup is keyed off the `placecube_realgravity_distractor_run1` checkpoint. If you're deploying an older 12-d ckpt, the goal-color answers don't apply.*

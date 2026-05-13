@@ -93,14 +93,12 @@ class SO101(BaseAgent):
             normalize_action=False,
         )
 
-        # Slower movement for SO101: arm joint delta caps halved (was ±0.1
-        # rad/step at 10 Hz = ~57 deg/s) to limit the very fast motions the
-        # previous policy was producing. Gripper delta cap unchanged so
-        # grasping still closes/opens quickly.
+        # Arm joint delta caps at ±0.1 rad/step (10 Hz = ~57 deg/s). Gripper
+        # delta cap ±0.2 so grasping still closes/opens quickly.
         pd_joint_delta_pos = PDJointPosControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.05, -0.05, -0.05, -0.05, -0.05, -0.2],
-            [0.05, 0.05, 0.05, 0.05, 0.05, 0.2],
+            [-0.1, -0.1, -0.1, -0.1, -0.1, -0.2],
+            [0.1, 0.1, 0.1, 0.1, 0.1, 0.2],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
             force_limit=100,

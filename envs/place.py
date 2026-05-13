@@ -16,7 +16,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
-from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
+from mani_skill.utils.structs.types import DefaultMaterialsConfig, GPUMemoryConfig, SimConfig
 from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
 
 from .robot.so100 import SO100
@@ -141,14 +141,15 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     bin_half_size_z_range: Sequence[float] = (0.024 / 2, 0.036 / 2)
 
     # Friction for the cubes (painted wood — can be quite slippery).
-    item_friction_range: Sequence[float] = (0.05, 0.6)
+    item_friction_range: Sequence[float] = (0.4, 0.6)
     # Mass range in kg. Sampled directly per env; the per-env density passed
     # to SAPIEN is then mass / volume, so the mass is hard-bounded regardless
     # of cube_half_size_range. Real measured cube weight ≈ 4.5 g, so the
     # range straddles it symmetrically.
     item_mass_range: Sequence[float] = (0.003, 0.006)
-    # Friction for the table top (plastic in the real setup → low friction).
-    table_friction_range: Sequence[float] = (0.05, 0.4)
+    # Friction for the table top. Fixed at 0.5 (no randomization) so contacts
+    # average a clean 0.5 against cubes and the bowl.
+    table_friction_range: Sequence[float] = (0.5, 0.5)
     randomize_item_color: bool = False
 
 
@@ -244,7 +245,15 @@ class Place(DefaultCameraEnv):
                 max_rigid_contact_count=2 ** 20,
                 max_rigid_patch_count=2 ** 19,
                 found_lost_pairs_capacity=2 ** 26,
-            )
+            ),
+            # Default material for any actor that does not set its own:
+            # 0.5 (was 0.3) so the table/ground/scene baseline matches the
+            # bowl and the table-friction range upper bound.
+            default_materials_config=DefaultMaterialsConfig(
+                static_friction=0.5,
+                dynamic_friction=0.5,
+                restitution=0.0,
+            ),
         )
 
     def _load_agent(self, options: dict):
@@ -642,6 +651,7 @@ class Place(DefaultCameraEnv):
             for render_shape in comp.render_shapes:
                 for part in render_shape.parts:
                     part.material.set_base_color(rgba)
+                    part.material.set_emission(rgba)
 
     def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
         """Sample goal_color_idx (honoring options) and n_distractors distractor

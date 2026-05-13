@@ -78,6 +78,8 @@ class Args:
     """if toggled, only runs evaluation with the given model checkpoint and saves the evaluation trajectories"""
     checkpoint: Optional[str] = None
     """path to a pretrained checkpoint file to start evaluation/training from (if set to "wandb" will attempt downloading from wandb)"""
+    freeze_encoder_after_frac: float = 0.0
+    """fraction of total_timesteps after which the CNN encoder is frozen (no further updates). 0.0 = never freeze."""
 
     # Environment specific arguments
     env_id: str = "SO101LiftCube-v1"
@@ -94,8 +96,8 @@ class Args:
     """the number of parallel environments"""
     num_eval_envs: int = 16
     """the number of parallel evaluation environments"""
-    partial_reset: bool = False
-    """whether to let parallel environments reset upon termination instead of truncation"""
+    partial_reset: bool = True
+    """whether to let parallel environments reset upon termination instead of truncation. Default True: episodes end the step an env reports success, so the buffer doesn't fill with already-succeeded frames."""
     eval_partial_reset: bool = False
     """whether to let parallel evaluation environments reset upon termination instead of truncation"""
     reconfiguration_freq: Optional[int] = None
@@ -786,6 +788,12 @@ if __name__ == "__main__":
     actor_optimizer = optim.Adam(list(actor.parameters()),
                                  lr=args.policy_lr, capturable=args.cudagraphs and not args.compile)
 
+    freeze_encoder_step = int(args.total_timesteps * args.freeze_encoder_after_frac) if args.freeze_encoder_after_frac > 0 else 0
+    critic_only_optimizer = None
+    if freeze_encoder_step > 0:
+        critic_only_optimizer = optim.Adam(list(critic.parameters()),
+                                 lr=args.q_lr, capturable=args.cudagraphs and not args.compile)
+
     # ── Replay buffer ──────────────────────────────────────────────────────
 
     # TODO: Buffer stores current and next observations, should only store one
@@ -898,6 +906,66 @@ if __name__ == "__main__":
 
         return TensorDict(actor_loss=actor_loss.detach())
 
+    # Frozen-encoder variant of update_main. Built only when freeze is enabled.
+    # Differences vs update_main: encoder forward wrapped in no_grad (no encoder
+    # gradients computed), and uses critic_only_optimizer (no encoder params).
+    # The next_obs branch was already in no_grad; we only change the obs branch.
+    def update_main_frozen(data):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.no_grad():
+                next_obs = encoder(data["next_observations"]['rgb'])
+                next_state = data["next_observations"]['state']
+                next_state_actions, next_state_log_pi, _ = actor.get_action(next_obs, next_state)
+
+                bootstrap = (~data["dones"]).float()
+                discount = args.gamma
+                rewards = data["rewards"].flatten()
+
+                entropy_bonus = alpha * next_state_log_pi.flatten()
+                rewards_with_entropy = rewards - bootstrap.flatten() * discount * entropy_bonus
+
+                target_distributions = critic_target.categorical(
+                    next_obs, next_state, next_state_actions,
+                    rewards_with_entropy, bootstrap, discount
+                )
+
+                obs = encoder(data["observations"]['rgb'])
+
+            state = data["observations"]['state']
+
+            q_outputs = critic(obs, state, data["actions"])
+            q_log_probs = F.log_softmax(q_outputs, dim=-1)
+            q_losses = -torch.sum(target_distributions * q_log_probs, dim=-1).mean(dim=-1)
+            critic_loss = q_losses.sum()
+
+            with torch.no_grad():
+                q_probs = F.softmax(q_outputs, dim=-1)
+                q_values = torch.sum(q_probs * critic.q_support, dim=-1)
+                q_max = q_values.max()
+                q_min = q_values.min()
+
+        critic_only_optimizer.zero_grad()
+        critic_loss.backward()
+        critic_only_optimizer.step()
+
+        if args.autotune:
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                with torch.no_grad():
+                    _, log_pi, _ = actor.get_action(obs, state)
+                alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+
+            alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            alpha_optimizer.step()
+
+            alpha.copy_(log_alpha.detach().exp())
+        else:
+            alpha_loss = torch.tensor(0.0, device=device)
+
+        return TensorDict(critic_loss=critic_loss.detach(), q_max=q_max, q_min=q_min,
+                          alpha=alpha.detach(), alpha_loss=alpha_loss.detach(),
+                          encoded_rgb=obs.detach())
+
     # ── Compile & CudaGraphs ──────────────────────────────────────────────
 
     if args.compile:
@@ -905,10 +973,14 @@ if __name__ == "__main__":
         update_actor = torch.compile(update_actor)
         get_rollout_action = torch.compile(get_rollout_action)
         get_eval_action = torch.compile(get_eval_action)
+        if freeze_encoder_step > 0:
+            update_main_frozen = torch.compile(update_main_frozen)
 
     if args.cudagraphs:
         update_main = CudaGraphModule(update_main)
         update_actor = CudaGraphModule(update_actor)
+        if freeze_encoder_step > 0:
+            update_main_frozen = CudaGraphModule(update_main_frozen)
 
     # ── Training loop ──────────────────────────────────────────────────────
 
@@ -921,6 +993,7 @@ if __name__ == "__main__":
     avg_returns = deque(maxlen=20)
     desc = ""
     d = {}
+    encoder_frozen = False
 
     for iteration in range(args.num_total_iterations + 2):  # +2 for final eval
         # Evaluate
@@ -977,13 +1050,21 @@ if __name__ == "__main__":
         # Setting next as current obs
         obs = next_obs
 
+        # Freeze encoder once we cross the configured fraction of training.
+        if freeze_encoder_step > 0 and not encoder_frozen and global_step >= freeze_encoder_step:
+            for p in encoder.parameters():
+                p.requires_grad = False
+            encoder.eval()
+            encoder_frozen = True
+            print(f"Step {global_step}: encoder frozen (no further CNN updates).")
+
         # Training updates
         if global_step > args.learning_starts:
             for grad_step in range(args.num_updates):
                 data = rb.sample(args.batch_size)
 
                 # update critic and encoder and actor entropy
-                out_main = update_main(data)
+                out_main = update_main_frozen(data) if encoder_frozen else update_main(data)
                 encoded_rgb = out_main.pop("encoded_rgb", None)
 
                 # update actor (policy)

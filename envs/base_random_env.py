@@ -162,21 +162,9 @@ class BaseRandomEnv(BaseEnv):
         self._objects_to_remove_from_greenscreen = []
 
     def _load_lighting(self, options: dict):
-        """Load scene lighting with optional randomization."""
-        if self.domain_randomization and self.domain_randomization_config.randomize_lighting:
-            # Randomize brightness only, not hue: keeps the white bin looking white/grey
-            # across episodes instead of picking up a per-channel color tint.
-            ambient_intensity = self._batched_episode_rng.uniform(0.2, 0.5, size=(1,))
-            ambient_colors = np.repeat(ambient_intensity, 3, axis=-1)
-            for i, scene in enumerate(self.scene.sub_scenes):
-                scene.render_system.ambient_light = ambient_colors[i]
-        else:
-            self.scene.set_ambient_light([0.3, 0.3, 0.3])
-
-        self.scene.add_directional_light(
-            [1, 1, -1], [1, 1, 1], shadow=False, shadow_scale=5, shadow_map_size=2048
-        )
-        self.scene.add_directional_light([0, 0, -1], [1, 1, 1])
+        # Zero ambient + no directional lights → only emissive materials are visible,
+        # no shadows can form because there is nothing to cast them.
+        self.scene.set_ambient_light([0, 0, 0])
 
     def _load_camera_mount(self):
         """Create camera mount actors for pose randomization."""
@@ -217,6 +205,7 @@ class BaseRandomEnv(BaseEnv):
                         # PBR multiplies texture * base_color, so without clearing
                         # the texture (e.g. the table's wood) keeps showing.
                         part.material.set_base_color(rgba)
+                        part.material.set_emission(rgba)
                         if hasattr(part.material, "set_base_color_texture"):
                             try:
                                 part.material.set_base_color_texture(None)
@@ -251,6 +240,7 @@ class BaseRandomEnv(BaseEnv):
                         else:
                             color = list(self.domain_randomization_config.robot_color)
                         part.material.set_base_color(color + [1])
+                        part.material.set_emission(color + [1])
 
     def _randomize_gripper_speed(self, env_idx: torch.Tensor):
         """Randomize gripper stiffness/damping per episode."""
@@ -299,9 +289,24 @@ class BaseRandomEnv(BaseEnv):
         elif isinstance(obj, (Actor, Link)):
             self._objects_to_remove_from_greenscreen.append(obj)
 
+    def _make_scene_emissive(self):
+        # Scene has zero ambient + no directional lights, so anything not
+        # emissive renders black. Walk every render shape in every sub-scene
+        # and copy base_color → emission so all objects glow with their own
+        # color and require no external lighting.
+        for sub_scene in self.scene.sub_scenes:
+            for entity in sub_scene.entities:
+                comp = entity.find_component_by_type(RenderBodyComponent)
+                if comp is None:
+                    continue
+                for render_shape in comp.render_shapes:
+                    for part in render_shape.parts:
+                        part.material.set_emission(part.material.get_base_color())
+
     def _after_reconfigure(self, options: dict):
         """Build segmentation IDs and load overlay image to GPU."""
         super()._after_reconfigure(options)
+        self._make_scene_emissive()
 
         if not self.domain_randomization_config.apply_overlay:
             self._objects_to_remove_from_greenscreen = []
