@@ -16,6 +16,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
+from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
 from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
 
 from .robot.so100 import SO100
@@ -173,6 +174,7 @@ class Place(DefaultCameraEnv):
         *args,
         item_type="cube",
         n_distractors: int = 1,
+        use_real_bowl: bool = True,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
         domain_randomization_config: Union[
@@ -192,6 +194,7 @@ class Place(DefaultCameraEnv):
             )
         self.item_type = item_type
         self.n_distractors = n_distractors
+        self.use_real_bowl = use_real_bowl
 
         # Robot-specific configuration
         if robot_uids == "so100":
@@ -224,6 +227,20 @@ class Place(DefaultCameraEnv):
             domain_randomization=domain_randomization,
             domain_randomization_config=self.domain_randomization_config,
             **kwargs,
+        )
+
+    @property
+    def _default_sim_config(self):
+        # Bowl mesh uses many CoACD convex hulls per env. At 2048 envs the
+        # default PhysX GPU buffers overflow (contact + broad-phase pairs).
+        # Bump 2x; the bowl is also re-decomposed with max_convex_hull=16
+        # below so per-env pair count stays bounded.
+        return SimConfig(
+            gpu_memory_config=GPUMemoryConfig(
+                max_rigid_contact_count=2 ** 20,
+                max_rigid_patch_count=2 ** 19,
+                found_lost_pairs_capacity=2 ** 26,
+            )
         )
 
     def _load_agent(self, options: dict):
@@ -388,27 +405,66 @@ class Place(DefaultCameraEnv):
         self.item = Actor.merge(items, name="item")
         self.add_to_state_dict_registry(self.item)
 
-        # Build bins (per-env for domain randomization)
-        bin_color = sapien.render.RenderMaterial(base_color=[1.0, 1.0, 1.0, 1.0])
-        thickness = 0.005
-        self.bin_thickness = thickness
-
-        # Default bin half sizes (mid-range)
+        # Build bins (per-env). Two modes:
+        #   - parametric: 5-box rectangular tray, dimensions randomized via
+        #     bin_half_size_*_range in PlaceRandomizationConfig.
+        #   - use_real_bowl=True: one shared .obj mesh (from sam3d/) loaded
+        #     per env. Convex-decomposed (CoACD) for dynamic collision. Mesh
+        #     origin is bowl bottom-center, so bin pose Z = 0 puts the bowl
+        #     floor flush with the table. No size randomization; half_sizes
+        #     are taken from the mesh AABB so the success check still works.
         cfg = self.domain_randomization_config
-        bin_half_sizes_x = np.ones(self.num_envs) * (cfg.bin_half_size_x_range[0] + cfg.bin_half_size_x_range[1]) / 2
-        bin_half_sizes_y = np.ones(self.num_envs) * (cfg.bin_half_size_y_range[0] + cfg.bin_half_size_y_range[1]) / 2
-        bin_half_sizes_z = np.ones(self.num_envs) * (cfg.bin_half_size_z_range[0] + cfg.bin_half_size_z_range[1]) / 2
+        bin_color = sapien.render.RenderMaterial(base_color=[1.0, 1.0, 1.0, 1.0])
 
-        if self.domain_randomization:
-            bin_half_sizes_x = self._batched_episode_rng.uniform(
-                low=cfg.bin_half_size_x_range[0], high=cfg.bin_half_size_x_range[1]
+        if self.use_real_bowl:
+            import os
+            mesh_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "meshes", "bowl.obj"
             )
-            bin_half_sizes_y = self._batched_episode_rng.uniform(
-                low=cfg.bin_half_size_y_range[0], high=cfg.bin_half_size_y_range[1]
-            )
-            bin_half_sizes_z = self._batched_episode_rng.uniform(
-                low=cfg.bin_half_size_z_range[0], high=cfg.bin_half_size_z_range[1]
-            )
+            # Read mesh AABB to set bin_half_sizes (used by success check).
+            try:
+                import open3d as _o3d
+                _mesh = _o3d.io.read_triangle_mesh(mesh_path)
+                _v = np.asarray(_mesh.vertices)
+                _mn, _mx = _v.min(0), _v.max(0)
+                self.bowl_half_x = float((_mx[0] - _mn[0]) / 2)
+                self.bowl_half_y = float((_mx[1] - _mn[1]) / 2)
+                self.bowl_half_z = float((_mx[2] - _mn[2]) / 2)
+                self.bowl_z_floor = float(_mn[2])  # ~0 since mesh was re-origined
+            except Exception as e:
+                # Fallback hardcoded from earlier inspection
+                self.bowl_half_x, self.bowl_half_y, self.bowl_half_z = 0.074, 0.0745, 0.0265
+                self.bowl_z_floor = 0.0
+            # The "thickness" semantics are kept so bin pose z = thickness/2
+            # places the bowl floor on the table. The bowl wall height is
+            # 2*bowl_half_z. The success criterion only uses bin_half_x/y.
+            self.bin_thickness = 0.0  # bowl floor is at actor origin
+            bin_half_sizes_x = np.ones(self.num_envs) * self.bowl_half_x
+            bin_half_sizes_y = np.ones(self.num_envs) * self.bowl_half_y
+            bin_half_sizes_z = np.ones(self.num_envs) * self.bowl_half_z
+            # Reward target z: at the bowl rim. Releasing the cube right at
+            # rim height lets it drop straight down into the bowl center
+            # (short 5 cm fall, no rim-bounce).
+            self.target_z_above_floor = 2 * self.bowl_half_z
+        else:
+            self.bin_thickness = 0.005
+            # Parametric bin: reward target is at the bin floor (legacy).
+            self.target_z_above_floor = 0.0
+            # Default bin half sizes (mid-range)
+            bin_half_sizes_x = np.ones(self.num_envs) * (cfg.bin_half_size_x_range[0] + cfg.bin_half_size_x_range[1]) / 2
+            bin_half_sizes_y = np.ones(self.num_envs) * (cfg.bin_half_size_y_range[0] + cfg.bin_half_size_y_range[1]) / 2
+            bin_half_sizes_z = np.ones(self.num_envs) * (cfg.bin_half_size_z_range[0] + cfg.bin_half_size_z_range[1]) / 2
+
+            if self.domain_randomization:
+                bin_half_sizes_x = self._batched_episode_rng.uniform(
+                    low=cfg.bin_half_size_x_range[0], high=cfg.bin_half_size_x_range[1]
+                )
+                bin_half_sizes_y = self._batched_episode_rng.uniform(
+                    low=cfg.bin_half_size_y_range[0], high=cfg.bin_half_size_y_range[1]
+                )
+                bin_half_sizes_z = self._batched_episode_rng.uniform(
+                    low=cfg.bin_half_size_z_range[0], high=cfg.bin_half_size_z_range[1]
+                )
 
         self.bin_half_sizes_x = common.to_tensor(bin_half_sizes_x, device=self.device)
         self.bin_half_sizes_y = common.to_tensor(bin_half_sizes_y, device=self.device)
@@ -417,31 +473,57 @@ class Place(DefaultCameraEnv):
 
         bins = []
         for i in range(self.num_envs):
-            bin_half_size = [bin_half_sizes_x[i], bin_half_sizes_y[i], bin_half_sizes_z[i]]
             builder = self.scene.create_actor_builder()
+            if self.use_real_bowl:
+                # Dynamic actor with CoACD-decomposed collision and the real
+                # mesh visual. Origin is at the bowl bottom-center.
+                bowl_material = sapien.pysapien.physx.PhysxMaterial(
+                    static_friction=0.5, dynamic_friction=0.5, restitution=0.0,
+                )
+                builder.add_multiple_convex_collisions_from_file(
+                    filename=mesh_path,
+                    scale=(1.0, 1.0, 1.0),
+                    material=bowl_material,
+                    density=500.0,
+                    decomposition="coacd",
+                    decomposition_params=dict(threshold=0.3, max_convex_hull=8),
+                )
+                # Visual from .ply alongside .obj — carries baked vertex
+                # colors from the original Gaussian splat's SH DC values.
+                ply_path = os.path.splitext(mesh_path)[0] + ".ply"
+                visual_path = ply_path if os.path.exists(ply_path) else mesh_path
+                builder.add_visual_from_file(
+                    filename=visual_path,
+                    scale=(1.0, 1.0, 1.0),
+                )
+                z0 = 0.0  # floor on table
+                initial_z = z0
+            else:
+                bin_half_size = [bin_half_sizes_x[i], bin_half_sizes_y[i], bin_half_sizes_z[i]]
+                thickness = self.bin_thickness
+                # Bin floor
+                bin_center_pose = sapien.Pose([0.0, 0.0, thickness / 2])
+                bin_center_half_size = [bin_half_size[0], bin_half_size[1], thickness / 2]
+                builder.add_box_collision(pose=bin_center_pose, half_size=bin_center_half_size)
+                builder.add_box_visual(pose=bin_center_pose, half_size=bin_center_half_size, material=bin_color)
 
-            # Bin floor
-            bin_center_pose = sapien.Pose([0.0, 0.0, thickness / 2])
-            bin_center_half_size = [bin_half_size[0], bin_half_size[1], thickness / 2]
-            builder.add_box_collision(pose=bin_center_pose, half_size=bin_center_half_size)
-            builder.add_box_visual(pose=bin_center_pose, half_size=bin_center_half_size, material=bin_color)
+                # Bin walls
+                for j in [-1, 1]:
+                    # Y walls
+                    y = j * bin_center_half_size[1]
+                    wall_pose = sapien.Pose([0, y, bin_half_size[2]])
+                    wall_half_size = [bin_half_size[0], thickness / 2, bin_half_size[2]]
+                    builder.add_box_collision(pose=wall_pose, half_size=wall_half_size)
+                    builder.add_box_visual(pose=wall_pose, half_size=wall_half_size, material=bin_color)
+                    # X walls
+                    x = j * bin_center_half_size[0]
+                    wall_pose = sapien.Pose([x, 0, bin_half_size[2]])
+                    wall_half_size = [thickness / 2, bin_half_size[1], bin_half_size[2]]
+                    builder.add_box_collision(pose=wall_pose, half_size=wall_half_size)
+                    builder.add_box_visual(pose=wall_pose, half_size=wall_half_size, material=bin_color)
+                initial_z = bin_half_size[2]
 
-            # Bin walls
-            for j in [-1, 1]:
-                # Y walls
-                y = j * bin_center_half_size[1]
-                wall_pose = sapien.Pose([0, y, bin_half_size[2]])
-                wall_half_size = [bin_half_size[0], thickness / 2, bin_half_size[2]]
-                builder.add_box_collision(pose=wall_pose, half_size=wall_half_size)
-                builder.add_box_visual(pose=wall_pose, half_size=wall_half_size, material=bin_color)
-                # X walls
-                x = j * bin_center_half_size[0]
-                wall_pose = sapien.Pose([x, 0, bin_half_size[2]])
-                wall_half_size = [thickness / 2, bin_half_size[1], bin_half_size[2]]
-                builder.add_box_collision(pose=wall_pose, half_size=wall_half_size)
-                builder.add_box_visual(pose=wall_pose, half_size=wall_half_size, material=bin_color)
-
-            builder.initial_pose = sapien.Pose(p=[-0.2, 0, bin_half_size[2]])  # Offset to avoid collision with item at creation
+            builder.initial_pose = sapien.Pose(p=[-0.2, 0, initial_z])  # offset away from cube cluster
             builder.set_scene_idxs([i])
             bin_actor = builder.build(name=f"bin-{i}")
             bins.append(bin_actor)
@@ -707,9 +789,9 @@ class Place(DefaultCameraEnv):
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
 
-            # Goal is above bin center
+            # Goal is above bin center (above-rim for bowl, at-floor for parametric)
             goal_xyz = bin_xyz.clone()
-            goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx]
+            goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx] + self.target_z_above_floor
             self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
 
     def _get_obs_agent(self):
@@ -806,7 +888,7 @@ class Place(DefaultCameraEnv):
         item_pos = self.item.pose.p
         bin_pos = self.bin.pose.p.clone()
         goal_xyz = bin_pos.clone()
-        goal_xyz[..., 2] = self.bin_thickness + self.item_half_sizes
+        goal_xyz[..., 2] = self.bin_thickness + self.item_half_sizes + self.target_z_above_floor
 
         # Overall distance reward
         item_to_goal_dist = torch.linalg.norm(goal_xyz - item_pos, axis=1)

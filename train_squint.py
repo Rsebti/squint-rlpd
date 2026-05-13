@@ -88,6 +88,8 @@ class Args:
     """if False, disables the segmentation+overlay greenscreen so the CNN sees the raw sim (table, walls, full scene)"""
     n_distractors: int = 1
     """for cube tasks, number of distractor cubes to spawn alongside the target (0 = single block, 1 = goal + 1 distractor, up to 5 = full palette). Distractors get unique palette colors distinct from the goal. The 6-d goal-color one-hot is always passed to the policy regardless."""
+    use_real_bowl: bool = True
+    """If True (default), use the SAM-3D bowl mesh at envs/meshes/bowl.obj (CoACD-decomposed dynamic collider, ~15 cm diameter). Pass --no-use_real_bowl to fall back to the parametric rectangular bin. Use the mesh-rebuild script in scripts/mesh_bowl_from_ply.py to regenerate."""
     num_envs: int = 2048
     """the number of parallel environments"""
     num_eval_envs: int = 16
@@ -646,6 +648,8 @@ if __name__ == "__main__":
     if "PlaceCube" in args.env_id:
         env_kwargs["n_distractors"] = args.n_distractors
         eval_env_kwargs["n_distractors"] = args.n_distractors
+        env_kwargs["use_real_bowl"] = args.use_real_bowl
+        eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
 
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,
                     reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)

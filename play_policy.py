@@ -52,6 +52,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no_dr", action="store_true",
                     help="Turn off domain randomization for cleaner replays.")
+    ap.add_argument("--use_real_bowl", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Use envs/meshes/bowl.obj (default). Pass --no-use_real_bowl to use the parametric bin.")
     args = ap.parse_args()
 
     env_kwargs = dict(
@@ -65,6 +68,7 @@ def main():
             shader_pack="default", width=args.render_size, height=args.render_size
         ),
         n_distractors=args.n_distractors,
+        use_real_bowl=args.use_real_bowl,
     )
     env = gym.make(args.env_id, num_envs=1, **env_kwargs)
     env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=True)
