@@ -78,7 +78,7 @@ class Args:
     """if toggled, only runs evaluation with the given model checkpoint and saves the evaluation trajectories"""
     checkpoint: Optional[str] = None
     """path to a pretrained checkpoint file to start evaluation/training from (if set to "wandb" will attempt downloading from wandb)"""
-    freeze_encoder_after_frac: float = 0.0
+    freeze_encoder_after_frac: float = 0.9
     """fraction of total_timesteps after which the CNN encoder is frozen (no further updates). 0.0 = never freeze."""
 
     # Environment specific arguments
