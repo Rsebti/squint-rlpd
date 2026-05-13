@@ -104,7 +104,7 @@ class Args:
     """how often to reconfigure the environment during training"""
     eval_reconfiguration_freq: Optional[int] = 1
     """for benchmarking purposes we want to reconfigure the eval environment each reset to ensure objects are randomized in some tasks"""
-    eval_freq: int = 100_000
+    eval_freq: int = 200_000
     """evaluation frequency in terms of global steps"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
