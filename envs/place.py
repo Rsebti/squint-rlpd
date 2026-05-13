@@ -142,7 +142,11 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
 
     # Friction for the cubes (painted wood — can be quite slippery).
     item_friction_range: Sequence[float] = (0.05, 0.6)
-    item_density_range: Sequence[float] = (600, 1000)
+    # Mass range in kg. Sampled directly per env; the per-env density passed
+    # to SAPIEN is then mass / volume, so the mass is hard-bounded regardless
+    # of cube_half_size_range. Real measured cube weight ≈ 4.5 g, so the
+    # range straddles it symmetrically.
+    item_mass_range: Sequence[float] = (0.003, 0.006)
     # Friction for the table top (plastic in the real setup → low friction).
     table_friction_range: Sequence[float] = (0.05, 0.4)
     randomize_item_color: bool = False
@@ -182,7 +186,7 @@ class Place(DefaultCameraEnv):
         ] = PlaceRandomizationConfig(),
         domain_randomization=False,
         spawn_box_pos=[0.3, 0],
-        spawn_box_half_size=0.3 / 2,
+        spawn_box_half_size=0.25 / 2,
         **kwargs,
     ):
         if not (0 <= n_distractors <= 4):
@@ -285,7 +289,8 @@ class Place(DefaultCameraEnv):
         colors = np.tile(COLOR_PALETTE[0], (self.num_envs, 1))  # default red
         cfg = self.domain_randomization_config
         frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
-        densities = np.ones(self.num_envs) * (cfg.item_density_range[0] + cfg.item_density_range[1]) / 2
+        mass_mid = (cfg.item_mass_range[0] + cfg.item_mass_range[1]) / 2
+        masses = np.ones(self.num_envs) * mass_mid
 
         if self.item_type == "cube":
             half_sizes = (
@@ -307,10 +312,12 @@ class Place(DefaultCameraEnv):
                     low=cfg.item_friction_range[0],
                     high=cfg.item_friction_range[1],
                 )
-                densities = self._batched_episode_rng.uniform(
-                    low=cfg.item_density_range[0],
-                    high=cfg.item_density_range[1],
+                masses = self._batched_episode_rng.uniform(
+                    low=cfg.item_mass_range[0],
+                    high=cfg.item_mass_range[1],
                 )
+            volumes = (2 * half_sizes) ** 3
+            densities = masses / volumes
             self.item_half_sizes = common.to_tensor(half_sizes, device=self.device)
             self.item_dimensions = torch.stack([self.item_half_sizes] * 3, dim=-1)
 
@@ -349,10 +356,12 @@ class Place(DefaultCameraEnv):
                     low=cfg.item_friction_range[0],
                     high=cfg.item_friction_range[1],
                 )
-                densities = self._batched_episode_rng.uniform(
-                    low=cfg.item_density_range[0],
-                    high=cfg.item_density_range[1],
+                masses = self._batched_episode_rng.uniform(
+                    low=cfg.item_mass_range[0],
+                    high=cfg.item_mass_range[1],
                 )
+            volumes = np.pi * (half_radii ** 2) * (2 * half_heights)
+            densities = masses / volumes
             self.item_half_radii = common.to_tensor(half_radii, device=self.device)
             self.item_half_heights = common.to_tensor(half_heights, device=self.device)
             self.item_half_sizes = self.item_half_heights
@@ -361,6 +370,7 @@ class Place(DefaultCameraEnv):
         colors = np.concatenate([colors, np.ones((self.num_envs, 1))], axis=-1)
         self.item_frictions = common.to_tensor(frictions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
+        self.item_masses = common.to_tensor(masses, device=self.device)
 
         # Build items
         items = []
