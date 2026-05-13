@@ -1,0 +1,13 @@
+SAM 3D Objects dynamic-gs integration run
+Rendered image: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/3.jpeg
+Object mask: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/sam3_out/bowl_obj_00_mask.png
+Original image shape: (4032, 3024, 3)
+Used inference image shape: (518, 388, 3)
+Attempted sizes: [(518, (518, 388, 3))]
+Repo root: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/scripts/third_party/sam-3d-objects
+Config path: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/scripts/third_party/sam-3d-objects/checkpoints/hf/pipeline.yaml
+Saved runtime config: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/scripts/third_party/sam-3d-objects/checkpoints/hf/pipeline_runtime_small.yaml
+Saved gaussian splat: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/bowl_raw_output.ply
+Saved pose sidecar: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/bowl_pose.json
+Saved preview: /home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/bowl_preview.png
+No GLB object was returned by SAM 3D Objects.

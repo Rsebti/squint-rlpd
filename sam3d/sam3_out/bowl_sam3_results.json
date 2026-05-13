@@ -1,0 +1,28 @@
+{
+  "image_path": "/home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/3.jpeg",
+  "text_prompt": "white paper bowl",
+  "total_raw_masks": 1,
+  "total_after_filtering": 1,
+  "filter_params": {
+    "min_area_ratio": 0.002,
+    "max_area_ratio": 0.25,
+    "dedup_iou": 0.6,
+    "max_objects": 8,
+    "confidence_threshold": 0.05,
+    "min_score": 0.2
+  },
+  "objects": [
+    {
+      "mask_path": "/home/mrc-cuhk/Documents/dynamic_gaussian_splat/squint/sam3d/sam3_out/bowl_obj_00_mask.png",
+      "score": 0.91015625,
+      "bbox": [
+        532.68310546875,
+        1069.135009765625,
+        2772.94677734375,
+        2233.5849609375
+      ],
+      "mask_area": 1857372,
+      "object_index": 0
+    }
+  ]
+}
