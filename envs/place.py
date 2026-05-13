@@ -5,6 +5,7 @@ from typing import Any, Optional, Sequence, Union
 import dacite
 import numpy as np
 import sapien
+from sapien.render import RenderBodyComponent
 import torch
 from transforms3d.euler import euler2quat
 
@@ -18,6 +19,23 @@ from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
 
 from .robot.so100 import SO100
 from .robot.so101 import SO101
+
+
+# Goal-conditioned cube colors. Index in this palette is the goal_color_idx
+# the policy is conditioned on (one-hot 6) and is also accepted via
+# env.reset(options={"goal_color_idx": <int or 1-D tensor>}).
+COLOR_PALETTE = np.array(
+    [
+        [1.00, 0.00, 0.00],  # 0 red
+        [0.00, 0.00, 1.00],  # 1 blue
+        [0.00, 1.00, 0.00],  # 2 green
+        [1.00, 1.00, 0.00],  # 3 yellow
+        [0.60, 0.00, 0.80],  # 4 purple
+        [1.00, 0.50, 0.00],  # 5 orange
+    ],
+    dtype=np.float32,
+)
+NUM_COLORS = len(COLOR_PALETTE)
 
 
 @dataclass
@@ -128,8 +146,9 @@ class Place(DefaultCameraEnv):
             raise NotImplementedError(f"Unknown item_type: {self.item_type}")
 
         # Default values
-        colors = np.zeros((self.num_envs, 3))
-        colors[:, 0] = 1  # Red
+        # Placeholder colors for the build; the material is mutated per episode
+        # in _initialize_episode based on the sampled goal_color_idx.
+        colors = np.tile(COLOR_PALETTE[0], (self.num_envs, 1))  # default red
         cfg = self.domain_randomization_config
         frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
         densities = np.ones(self.num_envs) * (cfg.item_density_range[0] + cfg.item_density_range[1]) / 2
@@ -148,8 +167,8 @@ class Place(DefaultCameraEnv):
                     low=cfg.cube_half_size_range[0],
                     high=cfg.cube_half_size_range[1],
                 )
-                if cfg.randomize_item_color:
-                    colors = self._batched_episode_rng.uniform(low=0, high=1, size=(3,))
+                # Cube color is now goal-conditioned: sampled from COLOR_PALETTE
+                # in _initialize_episode and applied as a material mutation.
                 frictions = self._batched_episode_rng.uniform(
                     low=cfg.item_friction_range[0],
                     high=cfg.item_friction_range[1],
@@ -314,19 +333,14 @@ class Place(DefaultCameraEnv):
         self.bin = Actor.merge(bins, name="bin")
         self.add_to_state_dict_registry(self.bin)
 
-        # Distractor cube (cube tasks only): same size as the target, non-red color,
+        # Distractor cube (cube tasks only): same size as the target, palette
+        # color sampled per episode (always different from the goal color),
         # spawns face-to-face with the target in _initialize_episode.
         self.distractor = None
         if self.item_type == "cube":
-            distractor_colors = np.zeros((self.num_envs, 3))
-            # Default (no domain randomization): solid blue so it never collides with the red target.
-            distractor_colors[:, 2] = 1.0
-            if self.domain_randomization and cfg.randomize_item_color:
-                # Sample any RGB but clamp the red channel so the distractor never
-                # looks red-dominant (target is pure red).
-                distractor_rgb = self._batched_episode_rng.uniform(low=0, high=1, size=(3,))
-                distractor_rgb[:, 0] *= 0.5
-                distractor_colors = distractor_rgb
+            # Placeholder color (mutated per episode). Default to blue so a
+            # non-randomized rollout shows a distinguishable distractor.
+            distractor_colors = np.tile(COLOR_PALETTE[1], (self.num_envs, 1))
             distractor_colors = np.concatenate(
                 [distractor_colors, np.ones((self.num_envs, 1))], axis=-1
             )
@@ -363,6 +377,10 @@ class Place(DefaultCameraEnv):
             if self.distractor is not None:
                 self.remove_object_from_greenscreen(self.distractor)
 
+        # Goal-color buffers (per env). _initialize_episode populates these.
+        self.goal_color_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.distractor_color_idx = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+
         # Convert rest_qpos to tensor
         self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
         # Table pose
@@ -385,6 +403,47 @@ class Place(DefaultCameraEnv):
         goal_builder.initial_pose = sapien.Pose(p=[0, 0, 0.1])
         self.goal_site = goal_builder.build_kinematic(name="goal_site")
         self._hidden_objects.append(self.goal_site)
+
+    def _set_actor_palette_color(self, actor, env_idx, color_idxs):
+        """Mutate the base_color of ``actor`` in-place, per env, to COLOR_PALETTE[idx]."""
+        if actor is None:
+            return
+        env_idx_list = env_idx.tolist() if isinstance(env_idx, torch.Tensor) else list(env_idx)
+        color_idxs_list = (
+            color_idxs.tolist() if isinstance(color_idxs, torch.Tensor) else list(color_idxs)
+        )
+        for k, i in enumerate(env_idx_list):
+            obj = actor._objs[i]
+            entity = getattr(obj, "entity", obj)  # Link wraps entity; merged Actor stores entity directly
+            comp = entity.find_component_by_type(RenderBodyComponent)
+            if comp is None:
+                continue
+            rgb = COLOR_PALETTE[int(color_idxs_list[k])]
+            rgba = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0]
+            for render_shape in comp.render_shapes:
+                for part in render_shape.parts:
+                    part.material.set_base_color(rgba)
+
+    def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
+        """Sample goal_color_idx (honoring options) and a distractor color != goal."""
+        b = len(env_idx)
+        # 1) goal color: from options if provided, else uniform over the palette.
+        goal_override = options.get("goal_color_idx") if isinstance(options, dict) else None
+        if goal_override is None:
+            goal_idx = torch.randint(NUM_COLORS, (b,), device=self.device, dtype=torch.long)
+        else:
+            if isinstance(goal_override, (int, np.integer)):
+                goal_idx = torch.full((b,), int(goal_override), device=self.device, dtype=torch.long)
+            else:
+                goal_idx = torch.as_tensor(goal_override, device=self.device, dtype=torch.long).reshape(-1)
+                assert goal_idx.numel() == b, (
+                    f"goal_color_idx must be an int or length-{b} sequence, got {tuple(goal_idx.shape)}"
+                )
+        # 2) distractor color: uniform over {0..NUM_COLORS-1} \ {goal_idx}, vectorized.
+        # Trick: sample in {0..NUM_COLORS-2} then shift up by 1 wherever >= goal.
+        offset = torch.randint(NUM_COLORS - 1, (b,), device=self.device, dtype=torch.long)
+        distractor_idx = offset + (offset >= goal_idx).long()
+        return goal_idx, distractor_idx
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
@@ -445,6 +504,16 @@ class Place(DefaultCameraEnv):
                 distractor_qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
                 self.distractor.set_pose(Pose.create_from_pq(distractor_xyz, distractor_qs))
 
+            # Goal-conditioned colors: sample new indices, paint the cubes, and
+            # cache the indices for the obs vector (one-hot goal color).
+            if self.item_type == "cube":
+                goal_idx, distractor_idx = self._sample_goal_and_distractor_colors(env_idx, options)
+                self.goal_color_idx[env_idx] = goal_idx
+                if self.distractor is not None:
+                    self.distractor_color_idx[env_idx] = distractor_idx
+                self._set_actor_palette_color(self.item, env_idx, goal_idx)
+                self._set_actor_palette_color(self.distractor, env_idx, distractor_idx)
+
             # Set bin pose
             bin_xyz = torch.zeros((b, 3))
             bin_xyz[:, :2] = spawn_center[env_idx, :2] + bin_xy_offset
@@ -467,6 +536,12 @@ class Place(DefaultCameraEnv):
         controller_state = self.agent.controller.get_state()
         if len(controller_state) > 0:
             obs.update(controller=controller_state)
+        # Goal-color conditioning (one-hot over COLOR_PALETTE). Available on all
+        # cube tasks; reward / success tracking remain tied to self.item.
+        if self.item_type == "cube":
+            obs["goal_color"] = torch.nn.functional.one_hot(
+                self.goal_color_idx, num_classes=NUM_COLORS
+            ).to(qpos.dtype)
         return obs
 
     def _get_obs_extra(self, info: dict):
