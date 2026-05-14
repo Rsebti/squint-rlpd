@@ -28,21 +28,19 @@ from .robot.so101 import SO101
 # env.reset(options={"goal_color_idx": <int or 1-D tensor>}).
 COLOR_PALETTE = np.array(
     [
-        [1.00, 0.00, 0.00],  # 0 red
-        [0.00, 0.00, 1.00],  # 1 blue
-        [0.00, 1.00, 0.00],  # 2 green
-        [1.00, 1.00, 0.00],  # 3 yellow
-        [0.60, 0.00, 0.80],  # 4 purple
-        [1.00, 0.50, 0.00],  # 5 orange
+        [187/255, 47/255,  27/255],  # 0 red
+        [  6/255, 33/255, 111/255],  # 1 blue
+        [ 24/255, 72/255,  30/255],  # 2 green
+        [216/255,      1, 73/255],   # 3 yellow (G clamped: 282→255)
+        [ 80/255, 43/255,  82/255],  # 4 purple
+        [216/255, 86/255,  54/255],  # 5 orange
     ],
     dtype=np.float32,
 )
 NUM_COLORS = len(COLOR_PALETTE)
 
-# Background color applied to the table, ground plane, and other non-foreground
-# scene actors. Matches the #B8ADA9 overlay PNG so SAPIEN-rendered frames blend
-# with the greenscreen background that the policy was trained on.
-SCENE_NEUTRAL_RGB = (0xB8 / 255.0, 0xAD / 255.0, 0xA9 / 255.0)
+# Neutral grey applied to the table, ground plane, and other scene actors.
+SCENE_NEUTRAL_RGB = (164 / 255.0, 166 / 255.0, 170 / 255.0)
 
 
 class FlatTableSceneBuilder(TableSceneBuilder):
@@ -141,7 +139,7 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     bin_half_size_z_range: Sequence[float] = (0.024 / 2, 0.036 / 2)
 
     # Friction for the cubes (painted wood — can be quite slippery).
-    item_friction_range: Sequence[float] = (0.4, 0.6)
+    item_friction_range: Sequence[float] = (0.2, 0.6)
     # Mass range in kg. Sampled directly per env; the per-env density passed
     # to SAPIEN is then mass / volume, so the mass is hard-bounded regardless
     # of cube_half_size_range. Real measured cube weight ≈ 4.5 g, so the
@@ -149,8 +147,21 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     item_mass_range: Sequence[float] = (0.003, 0.006)
     # Friction for the table top. Fixed at 0.5 (no randomization) so contacts
     # average a clean 0.5 against cubes and the bowl.
-    table_friction_range: Sequence[float] = (0.5, 0.5)
+    table_friction_range: Sequence[float] = (0.3, 0.5)
     randomize_item_color: bool = False
+
+    # Slight per-episode DR on the cube materials (goal + distractors): a small
+    # color jitter plus randomized PBR render params, so the cubes aren't
+    # rendered identically every episode. Kept subtle — the goal color must
+    # stay recognizable to the goal-conditioned policy.
+    item_color_jitter: float = 0.06
+    """Max per-channel multiplicative jitter on the cube's palette color."""
+    item_roughness_range: Sequence[float] = (0.35, 0.7)
+    """Per-episode cube material roughness (matte <-> slightly glossy)."""
+    item_metallic_range: Sequence[float] = (0.0, 0.15)
+    """Per-episode cube material metallic (kept low — painted wood is non-metallic)."""
+    item_specular_range: Sequence[float] = (0.3, 0.7)
+    """Per-episode cube material specular reflection strength."""
 
 
 class Place(DefaultCameraEnv):
@@ -282,11 +293,9 @@ class Place(DefaultCameraEnv):
         self.table_frictions = common.to_tensor(table_frictions, device=self.device)
         self.table_scene = FlatTableSceneBuilder(self, frictions=table_frictions)
         self.table_scene.build()
-        # Repaint the table, ground, and any other table-scene actors to the
-        # neutral background color so the SAPIEN-rendered scene matches the
-        # greenscreen overlay even before the overlay is applied. The cubes,
-        # bin, robot, and goal_site are built afterwards and keep their own
-        # materials.
+        # Repaint the table, ground, and any other table-scene actors to a
+        # neutral grey. The cubes, bin, robot, and goal_site are built
+        # afterwards and keep their own materials.
         self._recolor_entities_to(self.table_scene.scene_objects, SCENE_NEUTRAL_RGB)
 
         if self.item_type not in ["cube", "can"]:
@@ -398,7 +407,9 @@ class Place(DefaultCameraEnv):
                 )
                 builder.add_box_visual(
                     half_size=[half_sizes[i]] * 3,
-                    material=sapien.render.RenderMaterial(base_color=colors[i]),
+                    material=sapien.render.RenderMaterial(
+                        base_color=colors[i], roughness=0.5, metallic=0.0, specular=0.5,
+                    ),
                 )
                 builder.initial_pose = sapien.Pose(p=[0.2, 0, half_sizes[i]])  # Offset to avoid collision with bin at creation
 
@@ -411,7 +422,9 @@ class Place(DefaultCameraEnv):
                 builder.add_cylinder_visual(
                     radius=half_radii[i],
                     half_length=half_heights[i],
-                    material=sapien.render.RenderMaterial(base_color=colors[i]),
+                    material=sapien.render.RenderMaterial(
+                        base_color=colors[i], roughness=0.5, metallic=0.0, specular=0.5,
+                    ),
                     pose=cylinder_pose
                 )
                 builder.initial_pose = sapien.Pose(p=[0.2, 0, half_heights[i]])  # Offset to avoid collision with bin at creation
@@ -579,7 +592,9 @@ class Place(DefaultCameraEnv):
                     )
                     builder.add_box_visual(
                         half_size=[half_sizes[i]] * 3,
-                        material=sapien.render.RenderMaterial(base_color=distractor_colors_k[i]),
+                        material=sapien.render.RenderMaterial(
+                            base_color=distractor_colors_k[i], roughness=0.5, metallic=0.0, specular=0.5,
+                        ),
                     )
                     # Offset initial pose so distractors don't intersect each
                     # other, the target, or the bin at creation. Spread along x.
@@ -593,14 +608,6 @@ class Place(DefaultCameraEnv):
                 self.distractors.append(Actor.merge(per_env_actors, name=f"distractor_{k}"))
 
         self.bin_radius = torch.linalg.norm(self.bin_dimensions[:, :2], dim=-1)
-
-        # Set up greenscreening - keep robot, item, bin, and distractor visible
-        if self.apply_greenscreen:
-            self.remove_object_from_greenscreen(self.agent.robot)
-            self.remove_object_from_greenscreen(self.item)
-            self.remove_object_from_greenscreen(self.bin)
-            for d in self.distractors:
-                self.remove_object_from_greenscreen(d)
 
         # Goal-color buffers (per env). _initialize_episode populates these.
         self.goal_color_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -640,18 +647,41 @@ class Place(DefaultCameraEnv):
         color_idxs_list = (
             color_idxs.tolist() if isinstance(color_idxs, torch.Tensor) else list(color_idxs)
         )
+        cfg = self.domain_randomization_config
+        dr = self.domain_randomization
         for k, i in enumerate(env_idx_list):
             obj = actor._objs[i]
             entity = getattr(obj, "entity", obj)  # Link wraps entity; merged Actor stores entity directly
             comp = entity.find_component_by_type(RenderBodyComponent)
             if comp is None:
                 continue
-            rgb = COLOR_PALETTE[int(color_idxs_list[k])]
+            rng = self._batched_episode_rng[i]
+            rgb = COLOR_PALETTE[int(color_idxs_list[k])].astype(np.float32)
+            # Slight per-episode color jitter (small, so the goal color stays
+            # recognizable to the goal-conditioned policy).
+            if dr and cfg.item_color_jitter > 0:
+                j = cfg.item_color_jitter
+                rgb = np.clip(rgb * rng.uniform(1.0 - j, 1.0 + j, size=(3,)), 0.0, 1.0)
             rgba = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0]
+            # A bit of emissive glow (domain-randomized per episode) so the cube
+            # color stays readable across the wide brightness DR range.
+            lo, hi = cfg.item_emission_range
+            emit_f = rng.uniform(lo, hi) if dr else lo
+            emissive = [float(rgb[0]) * emit_f, float(rgb[1]) * emit_f, float(rgb[2]) * emit_f, 1.0]
+            # Per-episode PBR render-param DR (roughness / metallic / specular).
+            if dr:
+                roughness = float(rng.uniform(*cfg.item_roughness_range))
+                metallic = float(rng.uniform(*cfg.item_metallic_range))
+                specular = float(rng.uniform(*cfg.item_specular_range))
+            else:
+                roughness, metallic, specular = 0.5, 0.0, 0.5
             for render_shape in comp.render_shapes:
                 for part in render_shape.parts:
                     part.material.set_base_color(rgba)
-                    part.material.set_emission(rgba)
+                    part.material.set_emission(emissive)
+                    part.material.set_roughness(roughness)
+                    part.material.set_metallic(metallic)
+                    part.material.set_specular(specular)
 
     def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
         """Sample goal_color_idx (honoring options) and n_distractors distractor
@@ -957,7 +987,7 @@ class Place(DefaultCameraEnv):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 9
 
 
-@register_env("SO101PlaceCube-v1", max_episode_steps=75)
+@register_env("SO101PlaceCube-v1", max_episode_steps=100)
 class PlaceCube(Place):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)

@@ -86,8 +86,6 @@ class Args:
     """the id of the environment"""
     env_domain_randomization: bool = True
     """adds domain randomization flag if env supports it"""
-    apply_overlay: bool = False
-    """if False, disables the segmentation+overlay greenscreen so the CNN sees the raw sim (table, walls, full scene)"""
     n_distractors: int = 1
     """for cube tasks, number of distractor cubes to spawn alongside the target (0 = single block, 1 = goal + 1 distractor, up to 5 = full palette). Distractors get unique palette colors distinct from the goal. The 6-d goal-color one-hot is always passed to the policy regardless."""
     use_real_bowl: bool = True
@@ -104,8 +102,10 @@ class Args:
     """how often to reconfigure the environment during training"""
     eval_reconfiguration_freq: Optional[int] = 1
     """for benchmarking purposes we want to reconfigure the eval environment each reset to ensure objects are randomized in some tasks"""
-    eval_freq: int = 200_000
+    eval_freq: int = 400_000
     """evaluation frequency in terms of global steps"""
+    eval_max_episode_steps: int = 0
+    """override max episode steps for evaluation only (0 = use env spec)"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
     control_mode: Optional[str] = None 
@@ -644,19 +644,21 @@ if __name__ == "__main__":
     if args.env_domain_randomization:
         env_kwargs["domain_randomization"] = True
         eval_env_kwargs["domain_randomization"] = True
-    if not args.apply_overlay:
-        env_kwargs["domain_randomization_config"] = {"apply_overlay": False}
-        eval_env_kwargs["domain_randomization_config"] = {"apply_overlay": False}
     if "PlaceCube" in args.env_id:
         env_kwargs["n_distractors"] = args.n_distractors
         eval_env_kwargs["n_distractors"] = args.n_distractors
         env_kwargs["use_real_bowl"] = args.use_real_bowl
         eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
 
+    _make_steps = args.eval_max_episode_steps if args.eval_max_episode_steps > 0 else None
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,
-                    reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
+                    reconfiguration_freq=args.reconfiguration_freq,
+                    **({"max_episode_steps": _make_steps} if _make_steps else {}),
+                    **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs,
-                         reconfiguration_freq=args.eval_reconfiguration_freq, **eval_env_kwargs)
+                         reconfiguration_freq=args.eval_reconfiguration_freq,
+                         **({"max_episode_steps": _make_steps} if _make_steps else {}),
+                         **eval_env_kwargs)
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs)
 
     envs = FlattenRGBDObservationWrapper(envs, rgb=True, depth=False, state=True)

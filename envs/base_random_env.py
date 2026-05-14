@@ -1,7 +1,7 @@
 """Base environment classes with domain randomization support.
 
 This module provides a clean hierarchy of environment classes:
-- BaseRandomEnv: Common DR (gripper, lighting, robot color) + overlay support
+- BaseRandomEnv: Common DR (gripper, lighting, robot color)
 - ThirdCameraEnv: Third-person camera with every-step pose randomization
 - WristCameraEnv: Wrist camera with gripper-following randomization
 
@@ -28,7 +28,6 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Optional, Sequence, Union
 
-import cv2
 import numpy as np
 import sapien
 import torch
@@ -39,7 +38,6 @@ from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.structs.actor import Actor
-from mani_skill.utils.structs.articulation import Articulation
 from mani_skill.utils.structs.link import Link
 from mani_skill.utils.structs.types import SimConfig
 from mani_skill.utils.structs import Pose
@@ -54,10 +52,6 @@ class RandomizationConfig:
     # === Static settings (not affected by domain_randomization flag) ===
     initial_qpos_noise_scale: float = 0.02
     """Noise scale for initial robot joint positions."""
-    apply_overlay: bool = True
-    """Whether to apply background overlay (greenscreen). If False, returns raw simulation images."""
-    rgb_overlay_path: Optional[str] = os.path.join(os.path.dirname(__file__), "b8ada9_overlay.png")
-    """Path to background image. If None and apply_overlay=True, uses black background."""
 
     # === Common randomization settings (affected by domain_randomization flag) ===
     gripper_stiffness_range: Sequence[float] = (500, 2000)
@@ -67,7 +61,32 @@ class RandomizationConfig:
     robot_color: Optional[Union[str, Sequence[float]]] = (0.0, 0.0, 0.0)
     """Robot color in RGB (0-1). Set to "random" for per-episode randomization."""
     randomize_lighting: bool = True
-    """Whether to randomize ambient lighting."""
+    """Whether to randomize scene lighting per episode."""
+    # ══ Lighting DR — every "how bright is the env" knob lives in this block ══
+    # Each episode the scene is lit by: a global ambient fill (the dominant
+    # "room brightness"), a few directional lights (shading + shadows) and a
+    # couple of point lights (local highlights). Every level is re-sampled per
+    # episode, then all are scaled by one global exposure multiplier. The lights
+    # are always WHITE — only their intensity is randomized, never their hue.
+    room_brightness_range: Sequence[float] = (0.25, 0.62)
+    """Per-episode ambient fill level — the global, uniform room brightness."""
+    exposure_range: Sequence[float] = (0.55, 1.45)
+    """Per-episode global exposure multiplier applied on top of every light."""
+    num_directional_lights: int = 3
+    """Directional lights per sub-scene (light 0 is the brighter 'key' light)."""
+    directional_key_intensity_range: Sequence[float] = (0.15, 0.45)
+    """Key directional light intensity, before the exposure multiplier."""
+    directional_fill_intensity_range: Sequence[float] = (0.0, 0.18)
+    """Fill directional light intensity, before the exposure multiplier (can drop to ~0)."""
+    num_point_lights: int = 2
+    """Point lights per sub-scene, at random positions above the workspace."""
+    point_light_intensity_range: Sequence[float] = (0.0, 0.3)
+    """Per-episode per-point-light intensity, before the exposure multiplier."""
+    item_emission_range: Sequence[float] = (0.05, 0.35)
+    """Per-episode emissive glow on the task cubes, as a fraction of their base
+    color. A small self-lit component (domain-randomized) so the goal color
+    stays readable even in the dark tail of the brightness randomization.
+    0.0 = no glow (purely lit by scene lights)."""
 
     # === Third-person camera settings (only used by ThirdCameraEnv) ===
     third_camera_pos_noise: Sequence[float] = (0.025, 0.025, 0.025)
@@ -92,13 +111,12 @@ class RandomizationConfig:
 
 
 class BaseRandomEnv(BaseEnv):
-    """Base environment with domain randomization and overlay support.
+    """Base environment with domain randomization.
 
     Handles:
     - Gripper stiffness/damping randomization
     - Lighting randomization
     - Robot color randomization
-    - Background overlay (greenscreen) compositing
 
     Subclasses (ThirdCameraEnv, WristCameraEnv) handle camera-specific logic.
     """
@@ -123,23 +141,6 @@ class BaseRandomEnv(BaseEnv):
         elif isinstance(domain_randomization_config, RandomizationConfig):
             self.domain_randomization_config = domain_randomization_config
 
-        # Overlay state
-        self._objects_to_remove_from_greenscreen: list[Union[Actor, Link]] = []
-        self._segmentation_ids_to_keep: torch.Tensor = None
-        self._rgb_overlay_image: torch.Tensor = None
-        self._overlay_initialized = False
-
-        # Load overlay image as numpy array (will convert to tensor in _after_reconfigure)
-        self._rgb_overlay_np = None
-        if (
-            self.domain_randomization_config.apply_overlay
-            and self.domain_randomization_config.rgb_overlay_path is not None
-        ):
-            path = self.domain_randomization_config.rgb_overlay_path
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"rgb_overlay_path {path} not found.")
-            self._rgb_overlay_np = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
-
         super().__init__(*args, **kwargs)
 
 
@@ -152,19 +153,122 @@ class BaseRandomEnv(BaseEnv):
         pose = sapien_utils.look_at([0.5, 0.3, 0.35], [0.3, 0.0, 0.1])
         return CameraConfig("render_camera", pose, 512, 512, 52 * np.pi / 180, 0.01, 100)
 
-    @property
-    def apply_greenscreen(self) -> bool:
-        """Backward-compatible alias for apply_overlay."""
-        return self.domain_randomization_config.apply_overlay
-
-    def _load_scene(self, options: dict):
-        """Initialize scene. Subclasses should call super()._load_scene() first."""
-        self._objects_to_remove_from_greenscreen = []
-
     def _load_lighting(self, options: dict):
-        # Zero ambient + no directional lights → only emissive materials are visible,
-        # no shadows can form because there is nothing to cast them.
-        self.scene.set_ambient_light([0, 0, 0])
+        """Build per-sub-scene lighting: ambient + several directional lights +
+        point lights. Light directions/positions are created here; intensities,
+        colors and the ambient level are (re)sampled per episode in
+        _randomize_lighting so each of the parallel envs — and each episode —
+        sees different illumination (heavy brightness/illumination DR for
+        sim2real)."""
+        cfg = self.domain_randomization_config
+        randomize = self.domain_randomization and cfg.randomize_lighting
+
+        # Light component handles, indexed by sub-scene, for per-episode updates.
+        self._dir_lights: list[list] = []
+        self._point_lights: list[list] = []
+
+        for i, sub_scene in enumerate(self.scene.sub_scenes):
+            rng = self._batched_episode_rng[i]
+            dir_lights, point_lights = [], []
+
+            for j in range(cfg.num_directional_lights):
+                if randomize:
+                    direction = rng.uniform(-1.0, 1.0, size=(3,))
+                    direction[2] = -abs(direction[2]) - 0.2  # always shine downward-ish
+                else:
+                    direction = np.array([1.0, 1.0, -1.0]) if j == 0 else np.array([0.0, 0.0, -1.0])
+                dir_lights.append(self._add_directional_light(sub_scene, direction, [0.5, 0.5, 0.5]))
+
+            for j in range(cfg.num_point_lights if randomize else 0):
+                pos = rng.uniform([-0.2, -0.4, 0.25], [0.6, 0.4, 0.75])
+                point_lights.append(self._add_point_light(sub_scene, pos, [0.0, 0.0, 0.0]))
+
+            self._dir_lights.append(dir_lights)
+            self._point_lights.append(point_lights)
+
+        # Apply the initial intensities / colors / ambient to every sub-scene.
+        self._randomize_lighting(torch.arange(len(self.scene.sub_scenes)))
+
+    @staticmethod
+    def _add_directional_light(sub_scene, direction, color):
+        """Add a directional light to a single sub-scene, return its component.
+
+        Mirrors ManiSkillScene.add_directional_light but keeps the handle so the
+        light can be re-randomized per episode."""
+        entity = sapien.Entity()
+        entity.name = "directional_light"
+        light = sapien.render.RenderDirectionalLightComponent()
+        entity.add_component(light)
+        light.color = list(color)
+        light.shadow = False
+        light.pose = sapien.Pose([0, 0, 0], sapien.math.shortest_rotation([1, 0, 0], list(direction)))
+        sub_scene.add_entity(entity)
+        return light
+
+    @staticmethod
+    def _add_point_light(sub_scene, position, color):
+        """Add a point light to a single sub-scene, return its component."""
+        entity = sapien.Entity()
+        entity.name = "point_light"
+        light = sapien.render.RenderPointLightComponent()
+        entity.add_component(light)
+        light.color = list(color)
+        light.shadow = False
+        light.pose = sapien.Pose(list(position))
+        sub_scene.add_entity(entity)
+        return light
+
+    def _randomize_lighting(self, env_idx: torch.Tensor):
+        """Per-episode lighting randomization (white lights, intensity only):
+        the global ambient room brightness, each directional light's intensity
+        + direction, each point light's intensity + position — all scaled by
+        one global per-episode exposure multiplier. Runs for the envs being
+        reset so each episode sees fresh illumination."""
+        if not hasattr(self, "_dir_lights"):
+            return
+        cfg = self.domain_randomization_config
+
+        if not (self.domain_randomization and cfg.randomize_lighting):
+            # Deterministic fallback (eval / DR off): fixed neutral lighting.
+            for i in env_idx.tolist():
+                if i >= len(self._dir_lights):
+                    continue
+                self.scene.sub_scenes[i].render_system.ambient_light = [0.45, 0.45, 0.45]
+                for k, light in enumerate(self._dir_lights[i]):
+                    g = 0.5 if k == 0 else 0.2
+                    light.set_color([g, g, g])
+            return
+
+        for i in env_idx.tolist():
+            if i >= len(self._dir_lights):
+                continue
+            rng = self._batched_episode_rng[i]
+            sub_scene = self.scene.sub_scenes[i]
+
+            # One global per-episode exposure multiplier scaling every light.
+            exposure = rng.uniform(*cfg.exposure_range)
+
+            # Ambient fill = the global, uniform room brightness (white).
+            amb = float(np.clip(rng.uniform(*cfg.room_brightness_range) * exposure, 0.0, 1.0))
+            sub_scene.render_system.ambient_light = [amb, amb, amb]
+
+            # Directional lights: re-sample intensity + direction (white).
+            for k, light in enumerate(self._dir_lights[i]):
+                lo, hi = (cfg.directional_key_intensity_range if k == 0
+                          else cfg.directional_fill_intensity_range)
+                g = float(max(rng.uniform(lo, hi) * exposure, 0.0))
+                light.set_color([g, g, g])
+                direction = rng.uniform(-1.0, 1.0, size=(3,))
+                direction[2] = -abs(direction[2]) - 0.2
+                light.set_pose(sapien.Pose(
+                    [0, 0, 0], sapien.math.shortest_rotation([1, 0, 0], direction.tolist())))
+
+            # Point lights: re-sample intensity + position (white).
+            for light in self._point_lights[i]:
+                g = float(max(rng.uniform(*cfg.point_light_intensity_range) * exposure, 0.0))
+                light.set_color([g, g, g])
+                pos = rng.uniform([-0.2, -0.4, 0.25], [0.6, 0.4, 0.75])
+                light.set_pose(sapien.Pose(pos.tolist()))
 
     def _load_camera_mount(self):
         """Create camera mount actors for pose randomization."""
@@ -183,8 +287,8 @@ class BaseRandomEnv(BaseEnv):
 
         Mirrors the pattern used by _randomize_robot_color but for non-articulated
         scene actors (table, ground, walls). Pass the result of e.g.
-        ``self.table_scene.scene_objects`` to repaint the workspace to match the
-        greenscreen background color.
+        ``self.table_scene.scene_objects`` to repaint the workspace to a neutral
+        background color.
         """
         rgba = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0]
         for obj in entities:
@@ -205,7 +309,6 @@ class BaseRandomEnv(BaseEnv):
                         # PBR multiplies texture * base_color, so without clearing
                         # the texture (e.g. the table's wood) keeps showing.
                         part.material.set_base_color(rgba)
-                        part.material.set_emission(rgba)
                         if hasattr(part.material, "set_base_color_texture"):
                             try:
                                 part.material.set_base_color_texture(None)
@@ -240,7 +343,6 @@ class BaseRandomEnv(BaseEnv):
                         else:
                             color = list(self.domain_randomization_config.robot_color)
                         part.material.set_base_color(color + [1])
-                        part.material.set_emission(color + [1])
 
     def _randomize_gripper_speed(self, env_idx: torch.Tensor):
         """Randomize gripper stiffness/damping per episode."""
@@ -281,129 +383,6 @@ class BaseRandomEnv(BaseEnv):
             "gripper_damping": (self._gripper_damping - damp_lo) / damp_range,
         }
 
-    def remove_object_from_greenscreen(self, obj: Union[Articulation, Actor, Link]):
-        """Mark an object to be kept in foreground (not replaced by overlay)."""
-        if isinstance(obj, Articulation):
-            for link in obj.get_links():
-                self._objects_to_remove_from_greenscreen.append(link)
-        elif isinstance(obj, (Actor, Link)):
-            self._objects_to_remove_from_greenscreen.append(obj)
-
-    def _make_scene_emissive(self):
-        # Scene has zero ambient + no directional lights, so anything not
-        # emissive renders black. Walk every render shape in every sub-scene
-        # and copy base_color → emission so all objects glow with their own
-        # color and require no external lighting.
-        for sub_scene in self.scene.sub_scenes:
-            for entity in sub_scene.entities:
-                comp = entity.find_component_by_type(RenderBodyComponent)
-                if comp is None:
-                    continue
-                for render_shape in comp.render_shapes:
-                    for part in render_shape.parts:
-                        part.material.set_emission(part.material.get_base_color())
-
-    def _after_reconfigure(self, options: dict):
-        """Build segmentation IDs and load overlay image to GPU."""
-        super()._after_reconfigure(options)
-        self._make_scene_emissive()
-
-        if not self.domain_randomization_config.apply_overlay:
-            self._objects_to_remove_from_greenscreen = []
-            return
-
-        # Build segmentation IDs to keep
-        per_scene_ids = []
-        for obj in self._objects_to_remove_from_greenscreen:
-            per_scene_ids.append(obj.per_scene_id)
-
-        if per_scene_ids:
-            self._segmentation_ids_to_keep = torch.unique(torch.concatenate(per_scene_ids))
-        else:
-            self._segmentation_ids_to_keep = torch.tensor([], dtype=torch.int64)
-
-        # Load overlay image to GPU
-        if not self._overlay_initialized and self._rgb_overlay_np is not None:
-            # Get camera resolution from sensor config
-            for name, sensor in self._sensor_configs.items():
-                if isinstance(sensor, CameraConfig) and name != "render_camera":
-                    # Resize to camera resolution
-                    resized = cv2.resize(self._rgb_overlay_np, (sensor.width, sensor.height))
-                    self._rgb_overlay_image = common.to_tensor(resized, device=self.device)
-                    break
-
-            # If no camera found, use default size
-            if self._rgb_overlay_image is None and self._rgb_overlay_np is not None:
-                self._rgb_overlay_image = common.to_tensor(self._rgb_overlay_np, device=self.device)
-
-        # Create black overlay if no image provided but overlay is enabled
-        if not self._overlay_initialized and self._rgb_overlay_image is None:
-            for name, sensor in self._sensor_configs.items():
-                if isinstance(sensor, CameraConfig) and name != "render_camera":
-                    self._rgb_overlay_image = torch.zeros(
-                        (sensor.height, sensor.width, 3), dtype=torch.uint8, device=self.device
-                    )
-                    break
-
-        self._overlay_initialized = True
-        self._objects_to_remove_from_greenscreen = []
-
-    def _green_screen_rgb(self, rgb: torch.Tensor, segmentation: torch.Tensor, overlay: torch.Tensor) -> torch.Tensor:
-        """Apply background overlay using segmentation mask."""
-        actor_seg = segmentation[..., 0]
-        mask = torch.ones_like(actor_seg, dtype=torch.bool)
-
-        if self._segmentation_ids_to_keep.device != actor_seg.device:
-            self._segmentation_ids_to_keep = self._segmentation_ids_to_keep.to(actor_seg.device)
-
-        # Keep foreground objects (robot, task objects)
-        mask[torch.isin(actor_seg, self._segmentation_ids_to_keep)] = False
-        mask = mask[..., None]
-
-        # Composite: foreground where mask=False, overlay where mask=True
-        original_dtype = rgb.dtype
-        rgb = rgb.float()
-        overlay = overlay.float()
-        result = rgb * (~mask) + overlay * mask
-
-        return result.to(original_dtype)
-
-    def _get_obs_sensor_data(self, apply_texture_transforms: bool = True):
-        """Get sensor observations with optional overlay applied."""
-        obs = super()._get_obs_sensor_data(apply_texture_transforms)
-
-        if not self.domain_randomization_config.apply_overlay:
-            return obs
-
-        if not (self.obs_mode_struct.visual.rgb and self.obs_mode_struct.visual.segmentation):
-            return obs
-
-        if self._rgb_overlay_image is None:
-            return obs
-
-        # Apply overlay to all RGB cameras
-        for camera_name, camera_obs in obs.items():
-            if not isinstance(camera_obs, dict) or "rgb" not in camera_obs:
-                continue
-            if "segmentation" not in camera_obs:
-                continue
-            if camera_name == "render_camera":
-                continue
-
-            overlay = self._rgb_overlay_image
-            if overlay.device != camera_obs["rgb"].device:
-                self._rgb_overlay_image = overlay.to(camera_obs["rgb"].device)
-                overlay = self._rgb_overlay_image
-
-            obs[camera_name]["rgb"] = self._green_screen_rgb(
-                camera_obs["rgb"],
-                camera_obs["segmentation"],
-                overlay,
-            )
-
-        return obs
-
-
     def render_all(self):
         """Renders all human render cameras and sensors together, excluding segmentation."""
 
@@ -428,6 +407,7 @@ class BaseRandomEnv(BaseEnv):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         """Base episode initialization. Subclasses should call super() first."""
         self._randomize_gripper_speed(env_idx)
+        self._randomize_lighting(env_idx)
 
 
 class ThirdCameraEnv(BaseRandomEnv):

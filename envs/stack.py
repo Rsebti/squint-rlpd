@@ -294,12 +294,6 @@ class Stack(DefaultCameraEnv):
         self.itemB = Actor.merge(itemsB, name="itemB")
         self.add_to_state_dict_registry(self.itemB)
 
-        # Set up greenscreening - keep robot, itemA, and itemB visible
-        if self.apply_greenscreen:
-            self.remove_object_from_greenscreen(self.agent.robot)
-            self.remove_object_from_greenscreen(self.itemA)
-            self.remove_object_from_greenscreen(self.itemB)
-
         # Convert rest_qpos to tensor
         self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
         # Table pose

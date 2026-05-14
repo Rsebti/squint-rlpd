@@ -259,11 +259,6 @@ class Lift(DefaultCameraEnv):
         self.item = Actor.merge(items, name="item")
         self.add_to_state_dict_registry(self.item)
 
-        # Set up greenscreening - keep robot and item visible
-        if self.apply_greenscreen:
-            self.remove_object_from_greenscreen(self.agent.robot)
-            self.remove_object_from_greenscreen(self.item)
-
         # Convert rest_qpos to tensor
         self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
         # hardcoded pose for the table that places it such that the robot base is at 0 and on the edge of the table.
