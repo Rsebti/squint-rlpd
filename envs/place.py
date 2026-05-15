@@ -246,8 +246,8 @@ class Place(DefaultCameraEnv):
             PlaceRandomizationConfig, dict
         ] = PlaceRandomizationConfig(),
         domain_randomization=False,
-        spawn_box_pos=[0.3, 0],
-        spawn_box_half_size=0.25 / 2,
+        spawn_box_pos=[0.25, 0],
+        spawn_box_half_size=0.10,
         action_smooth_coef: float = 0.67,
         **kwargs,
     ):
