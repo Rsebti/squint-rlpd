@@ -72,8 +72,12 @@ class RandomizationConfig:
     """Inclusive integer range for per-env actuator delay (in control steps). Must lie within [0, max_delay_steps-1] of the controller config (default max 5)."""
     lag_alpha_range: Sequence[float] = (0.30, 0.45)
     """Range for per-env first-order-lag EMA mix. Centre 0.378."""
-    robot_color: Optional[Union[str, Sequence[float]]] = (0.0, 0.0, 0.0)
-    """Robot color in RGB (0-1). Set to "random" for per-episode randomization."""
+    robot_color: Optional[Union[str, Sequence[float]]] = (0.06, 0.06, 0.06)
+    """Robot color in RGB (0-1). Near-black (~6% albedo) — visibly black but
+    with enough diffuse response that Lambertian shading + specular sheen
+    reveal the arm geometry, matching real black ABS/PLA plastic which
+    reflects ~5-10%. Pure (0,0,0) made the robot look emissive-black with
+    no surface detail. Set to "random" for per-episode randomization."""
     randomize_lighting: bool = True
     """Whether to randomize scene lighting per episode."""
     # ══ Lighting DR — every "how bright is the env" knob lives in this block ══
