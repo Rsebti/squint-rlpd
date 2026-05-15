@@ -705,7 +705,7 @@ class BaseRandomEnv(BaseEnv):
             return
 
         sig   = self._batched_episode_rng[env_idx].uniform(sigma_lo, sigma_hi)
-        gain  = self._batched_episode_rng[env_idx].uniform(gain_lo,  gain_hi, size=(len(env_idx), 3))
+        gain  = self._batched_episode_rng[env_idx].uniform(gain_lo,  gain_hi, size=(3,))
         gam   = self._batched_episode_rng[env_idx].uniform(gamma_lo, gamma_hi)
         hue   = self._batched_episode_rng[env_idx].uniform(-hue_half, hue_half)
         sat   = self._batched_episode_rng[env_idx].uniform(sat_lo,   sat_hi)

@@ -69,9 +69,9 @@ class PDJointPosDelayLagController(PDJointPosController):
     def _ensure_state(self):
         """Lazy-allocate per-env state. Called from reset (which sees qpos)."""
         max_d = max(int(self.config.max_delay_steps), 1)
-        n_envs, n_j = self._target_qpos.shape
-        dev = self._target_qpos.device
         cur = self.qpos
+        n_envs, n_j = cur.shape
+        dev = cur.device
         need_alloc = (
             self._delay_buffer is None
             or self._delay_buffer.shape != (max_d, n_envs, n_j)
