@@ -24,10 +24,17 @@ from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.motors.motors_bus import MotorNormMode
 
+try:
+    import rerun as rr
+except ImportError:
+    rr = None
+
+JOINT_NAMES = ["pan", "lift", "elbow", "wrist_flex", "wrist_roll", "gripper"]
+
 # �═══════════════════════════════════════════════════════════════════════════╗
 # ║  EDIT THESE for your robot                                                ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-ROBOT_PORT = "/dev/ttyACM0"               # Mac: /dev/cu.usbmodemXXXX  (run: ls /dev/cu.*)
+ROBOT_PORT = "/dev/cu.usbmodem5B141129871"               # Mac: /dev/cu.usbmodemXXXX  (run: ls /dev/cu.*)
 CAMERA_INDEX = 0                          # webcam index: try 0, 1, or 2
 CALIBRATION_ID = "so101_follower_arm"     # filename (no extension) of your calibration .json
 CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .json
@@ -36,7 +43,7 @@ CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .j
 IMAGE_SIZE = 16          # CNN input H=W
 SIM_CAM_SIZE = 128       # sim wrist-camera resolution (intermediate resize)
 N_COLORS = 6             # goal-color one-hot length
-CONTROL_HZ = 10          # sim_freq=100 / control_freq=10
+CONTROL_HZ = 30          # sim_freq=100 / control_freq=10
 
 # Per-joint delta caps (rad/step): arm joints ±0.1, gripper ±0.2.
 DELTA_CAP = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.2], dtype=np.float32)
@@ -74,7 +81,7 @@ class RealRobotAgent:
         self._motor_keys = None
         # gripper mapping (measured): sim -10°..120°  <->  servo -62.5°..64.62°
         self._g_sim_min, self._g_sim_max = -10.0, 120.0
-        self._g_servo_min, self._g_servo_max = -62.5, 64.62
+        self._g_servo_min, self._g_servo_max = -60.13, 66.73
         self._g_sim_range = self._g_sim_max - self._g_sim_min
         self._g_servo_range = self._g_servo_max - self._g_servo_min
         robot.bus.motors["gripper"].norm_mode = MotorNormMode.DEGREES
@@ -186,6 +193,26 @@ def preprocess_image(rgb):
     return torch.from_numpy(img).unsqueeze(0).to(torch.uint8)
 
 
+def init_viz():
+    """Spawn a Rerun viewer window for live camera + joint plots."""
+    if rr is None:
+        raise RuntimeError("rerun not installed in this env (pip install rerun-sdk)")
+    rr.init("squint_infer", spawn=True)
+
+
+def log_step(step, raw_rgb, policy_rgb, qpos, target_qpos, action_raw):
+    """Push one timestep to the Rerun viewer."""
+    if rr is None:
+        return
+    rr.set_time("step", sequence=step)
+    rr.log("camera/raw", rr.Image(raw_rgb))
+    rr.log("camera/policy_input_16x16", rr.Image(policy_rgb))
+    for i, name in enumerate(JOINT_NAMES):
+        rr.log(f"joints/qpos_measured/{name}", rr.Scalars([float(qpos[i])]))
+        rr.log(f"joints/qpos_target/{name}", rr.Scalars([float(target_qpos[i])]))
+        rr.log(f"action_raw/{name}", rr.Scalars([float(action_raw[i])]))
+
+
 def build_state(qpos, target_qpos, goal_color):
     """18-d state vector = [measured_qpos(6), controller_target_qpos(6), goal_onehot(6)]."""
     onehot = np.zeros(N_COLORS, dtype=np.float32)
@@ -203,7 +230,13 @@ def main():
     p.add_argument("--goal_color", type=int, default=0, help="0 red 1 blue 2 green 3 yellow 4 purple 5 orange")
     p.add_argument("--action_scale", type=float, default=0.15, help="safety multiplier on policy action (lower = slower)")
     p.add_argument("--episode_steps", type=int, default=150, help="control steps per episode")
+    p.add_argument("--viz", action=argparse.BooleanOptionalAction, default=True, help="open a Rerun viewer with live camera + joint plots (--no-viz to disable)")
+    p.add_argument("--n_episodes", type=int, default=0, help="if >0, run this many episodes back-to-back without waiting for Enter")
+    p.add_argument("--log_dir", type=str, default=None, help="if set, dump per-step npz logs there (one file per episode)")
     args = p.parse_args()
+
+    if args.viz:
+        init_viz()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -220,12 +253,29 @@ def main():
     robot.connect()
     agent = RealRobotAgent(robot)
 
+    log_dir = Path(args.log_dir) if args.log_dir else None
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+    def episodes():
+        if args.n_episodes > 0:
+            for i in range(args.n_episodes):
+                yield i
+        else:
+            i = 0
+            while True:
+                input(f"\n[Enter] start episode (goal color {args.goal_color}), Ctrl+C to quit ")
+                yield i
+                i += 1
+
     try:
-        while True:
-            input(f"\n[Enter] start episode (goal color {args.goal_color}), Ctrl+C to quit ")
+        for ep in episodes():
+            if args.n_episodes > 0:
+                print(f"\n── Episode {ep + 1}/{args.n_episodes} (goal color {args.goal_color}) ──")
             agent.reset(REST_QPOS)                       # smooth move to rest pose
-            # use_target controller: target starts at the measured rest qpos
             target_qpos = agent.get_qpos().cpu().numpy().flatten()
+
+            log_qpos, log_target, log_action_raw, log_policy_rgb = [], [], [], []
 
             for step in range(args.episode_steps):
                 t0 = time.perf_counter()
@@ -238,15 +288,39 @@ def main():
                 obs_state = build_state(qpos, target_qpos, args.goal_color).to(device)
 
                 with torch.no_grad():
-                    action = actor(encoder(obs_rgb), obs_state)[0].cpu().numpy()
+                    raw_action = actor(encoder(obs_rgb), obs_state)[0].cpu().numpy()
 
-                # action ∈ [-1,1] → safety-scaled → per-joint delta → accumulate onto target.
-                action = np.clip(action * args.action_scale, -1.0, 1.0)
+                action = np.clip(raw_action * args.action_scale, -1.0, 1.0)
                 target_qpos = np.clip(target_qpos + action * DELTA_CAP, JOINT_LOWER, JOINT_UPPER)
                 agent.set_target_qpos(torch.from_numpy(target_qpos))
 
+                if args.viz:
+                    log_step(
+                        step=step,
+                        raw_rgb=rgb[0].cpu().numpy() if torch.is_tensor(rgb) else np.asarray(rgb[0]),
+                        policy_rgb=obs_rgb[0].cpu().numpy(),
+                        qpos=qpos,
+                        target_qpos=target_qpos,
+                        action_raw=raw_action,
+                    )
+                if log_dir:
+                    log_qpos.append(qpos.copy())
+                    log_target.append(target_qpos.copy())
+                    log_action_raw.append(raw_action.copy())
+                    log_policy_rgb.append(obs_rgb[0].cpu().numpy().copy())
+
                 time.sleep(max(0.0, 1.0 / CONTROL_HZ - (time.perf_counter() - t0)))
 
+            if log_dir:
+                np.savez(
+                    log_dir / f"ep{ep:03d}.npz",
+                    qpos=np.stack(log_qpos),
+                    target_qpos=np.stack(log_target),
+                    action_raw=np.stack(log_action_raw),
+                    policy_rgb=np.stack(log_policy_rgb),
+                    joint_names=np.array(JOINT_NAMES),
+                )
+                print(f"  → saved {log_dir / f'ep{ep:03d}.npz'}")
             print(f"Episode done ({args.episode_steps} steps).")
     except KeyboardInterrupt:
         print("\nQuitting.")
