@@ -15,7 +15,15 @@ SQUINT_REMOTE="${SQUINT_REMOTE:-https://github.com/fedecomi04/squint.git}"
 
 echo "==[1/4] miniforge + base tooling ============================"
 sudo apt-get update -qq
-sudo apt-get install -y -qq git wget tmux htop nvtop ffmpeg
+# libvulkan1 + vulkan-tools: SAPIEN's renderer logs a fallback warning
+# when libvulkan isn't installed system-wide ("Failed to find system
+# libvulkan. Fallback to SAPIEN builtin libvulkan."). Installing the
+# loader silences it and uses the NVIDIA driver's Vulkan ICD instead of
+# the bundled fallback.
+# nvtop intentionally omitted — not in stock Ubuntu repos on every image.
+sudo apt-get install -y -qq \
+    git wget tmux htop ffmpeg \
+    libvulkan1 vulkan-tools
 
 if [ ! -d "$HOME/miniforge3" ]; then
   # NB: not /tmp — many cloud VM images mount /tmp noexec, which breaks
