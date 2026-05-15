@@ -519,9 +519,13 @@ class WristCameraEnv(BaseRandomEnv):
     Position and rotation offsets are randomized every step when domain_randomization=True.
     """
 
-    # Base pose relative to gripper_link
+    # Base pose relative to gripper_link.
+    # Roll is rotated +90° vs the original (-90° → 0°) so the rendered image is
+    # landscape-oriented (long side horizontal), matching how the real wrist
+    # camera is mounted on the SO101. Flip to -180° if the resulting image is
+    # rotated the wrong way.
     WRIST_CAMERA_BASE_POS = (-0.0049, 0.0498, -0.0591)
-    WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-90), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
+    WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(0), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
     WRIST_CAMERA_FOV = np.deg2rad(71)  # 71 degrees
 
     def __init__(
