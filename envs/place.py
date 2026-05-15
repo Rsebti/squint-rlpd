@@ -1000,6 +1000,9 @@ class Place(DefaultCameraEnv):
             obs["goal_color"] = torch.nn.functional.one_hot(
                 self.goal_color_idx, num_classes=NUM_COLORS
             ).to(qpos.dtype)
+        # Bowl centre in the robot base frame (xyz). Appended last so it lands
+        # at the end of the flattened state vector.
+        obs["bowl_xyz_robot_frame"] = (self.agent.robot.pose.inv() * self.bin.pose).p
         return obs
 
     def _get_obs_extra(self, info: dict):
