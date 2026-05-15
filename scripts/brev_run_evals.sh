@@ -25,7 +25,10 @@ ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
 EP_STEPS="${EP_STEPS:-150}"                      # 5 s @ 30 Hz. 100 = 3.3 s is too short for pick+place
 NUM_ENVS="${NUM_ENVS:-2048}"
-WANDB_ENTITY="${WANDB_ENTITY:?set WANDB_ENTITY in the env before running}"
+# WANDB_ENTITY is optional — leave empty to let wandb pick the default entity
+# associated with the API key (your personal user). Set explicitly only if you
+# want runs under a team/workspace and that workspace exists on wandb.ai.
+WANDB_ENTITY="${WANDB_ENTITY:-}"
 WANDB_PROJECT="${WANDB_PROJECT:-maniskill-so101}"
 
 EVAL1_CKPT="runs/eval1/ckpt.pt"
@@ -41,11 +44,14 @@ run_stage() {
     fi
     extra+=(--checkpoint="$ckpt_path")
   fi
+  if [ -n "$WANDB_ENTITY" ]; then
+    extra+=(--wandb_entity="$WANDB_ENTITY")
+  fi
 
   echo ""
   echo "================================================================"
   echo "  $exp_name | seed=$seed | total=$TOTAL_TIMESTEPS | ep=$EP_STEPS"
-  echo "  warm-start: ${ckpt_path:-<none>}"
+  echo "  warm-start: ${ckpt_path:-<none>}    wandb_entity: ${WANDB_ENTITY:-<default>}"
   echo "================================================================"
 
   python train_squint.py \
@@ -57,7 +63,6 @@ run_stage() {
     --eval_max_episode_steps="$EP_STEPS" \
     --num_envs="$NUM_ENVS" \
     --track \
-    --wandb_entity="$WANDB_ENTITY" \
     --wandb_project_name="$WANDB_PROJECT" \
     --save_model \
     "${extra[@]}"

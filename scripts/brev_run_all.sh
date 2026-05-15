@@ -14,7 +14,9 @@
 set -euo pipefail
 
 : "${WANDB_API_KEY:?export WANDB_API_KEY before running}"
-: "${WANDB_ENTITY:?export WANDB_ENTITY before running}"
+# WANDB_ENTITY is optional — empty/unset means "use the default entity
+# associated with the API key" (your personal user on wandb.ai).
+export WANDB_ENTITY="${WANDB_ENTITY:-}"
 
 REPO_DIR="${REPO_DIR:-$HOME/squint}"
 SQUINT_REMOTE="${SQUINT_REMOTE:-https://github.com/fedecomi04/squint.git}"
