@@ -14,6 +14,10 @@ dependencies:
     # Environment
     - mani_skill_nightly
     - gymnasium
+    # Convex decomposition for the bowl mesh (envs/place.py uses
+    # decomposition="coacd"). Without this, scene load fails with
+    # ModuleNotFoundError inside sapien.wrapper.coacd.
+    - coacd
 
     # Utilities
     - numpy

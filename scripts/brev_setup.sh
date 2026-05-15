@@ -42,6 +42,10 @@ else
 fi
 conda activate squint
 
+# Belt-and-suspenders: install coacd into already-existing squint envs that
+# were created from an older environment.yaml (before coacd was listed).
+python -c "import coacd" 2>/dev/null || pip install -q coacd
+
 echo "==[4/4] wandb / HF login ====================================="
 if [ -z "${WANDB_API_KEY:-}" ]; then
   echo "ERROR: WANDB_API_KEY is required. Get it from https://wandb.ai/authorize" >&2
