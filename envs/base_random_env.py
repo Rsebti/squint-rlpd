@@ -72,7 +72,7 @@ class RandomizationConfig:
     """Inclusive integer range for per-env actuator delay (in control steps). Must lie within [0, max_delay_steps-1] of the controller config (default max 5)."""
     lag_alpha_range: Sequence[float] = (0.30, 0.45)
     """Range for per-env first-order-lag EMA mix. Centre 0.378."""
-    robot_color: Optional[Union[str, Sequence[float]]] = (0.06, 0.06, 0.06)
+    robot_color: Optional[Union[str, Sequence[float]]] = (0.03, 0.03, 0.03)
     """Robot color in RGB (0-1). Near-black (~6% albedo) — visibly black but
     with enough diffuse response that Lambertian shading + specular sheen
     reveal the arm geometry, matching real black ABS/PLA plastic which
@@ -148,20 +148,20 @@ class RandomizationConfig:
     # Applied to every RGB sensor frame BEFORE the policy sees it, to bracket
     # the photometric gap between PhysX-rendered images and real USB-cam
     # output (white balance, gamma, sensor noise, hue/sat drift).
-    image_noise_sigma_range: Sequence[float] = (0.01, 0.04)
+    image_noise_sigma_range: Sequence[float] = (0.0033, 0.0067)
     """Per-episode std of additive Gaussian noise on RGB in [0,1] scale. Resampled each step from the same per-env sigma."""
     image_channel_gain_range: Sequence[float] = (0.85, 1.15)
-    """Per-channel multiplicative gain (R, G, B independent). Models white-balance drift between cameras."""
+    """Per-episode scalar luminance gain applied equally to R, G, B. Models exposure/brightness drift between cameras (no color cast)."""
     image_gamma_range: Sequence[float] = (0.8, 1.2)
     """Per-episode gamma exponent applied to pixel values in [0, 1]. <1 lightens, >1 darkens."""
     image_jpeg_quality_range: Sequence[float] = (50, 95)
     """Per-episode JPEG quality (used by the image-pipeline DR wrapper when JPEG roundtripping is enabled). NB: actual JPEG roundtrip is not yet wired into _apply_image_pipeline_dr because it requires a CPU bounce; left here as a hook for a future wrapper."""
     image_jpeg_probability: float = 0.2
     """Probability per episode that JPEG roundtripping is applied. Bracket of common deploy-side stream compression. Currently informational (see image_jpeg_quality_range note)."""
-    image_hue_shift_deg: float = 5.0
-    """Half-range of per-episode hue shift in degrees (±). Applied uniformly to the whole frame each step."""
-    image_saturation_range: Sequence[float] = (0.7, 1.3)
-    """Per-episode saturation scale in HSV. <1 desaturates, >1 supersaturates."""
+    image_hue_shift_deg: float = 0.0
+    """Half-range of per-episode hue shift in degrees (±). Disabled (0.0) — colour randomization is restricted to the B/W spectrum, only luminance varies."""
+    image_saturation_range: Sequence[float] = (1.0, 1.0)
+    """Per-episode saturation scale in HSV. Pinned to 1.0 — colour randomization is restricted to the B/W spectrum, scene saturation is preserved."""
 
     def dict(self):
         return {k: v for k, v in asdict(self).items()}
@@ -705,7 +705,9 @@ class BaseRandomEnv(BaseEnv):
             return
 
         sig   = self._batched_episode_rng[env_idx].uniform(sigma_lo, sigma_hi)
-        gain  = self._batched_episode_rng[env_idx].uniform(gain_lo,  gain_hi, size=(3,))
+        # B/W-only: one scalar luminance gain per env, repeated across R, G, B.
+        gain_scalar = self._batched_episode_rng[env_idx].uniform(gain_lo, gain_hi)
+        gain = np.tile(np.asarray(gain_scalar)[:, None], (1, 3))
         gam   = self._batched_episode_rng[env_idx].uniform(gamma_lo, gamma_hi)
         hue   = self._batched_episode_rng[env_idx].uniform(-hue_half, hue_half)
         sat   = self._batched_episode_rng[env_idx].uniform(sat_lo,   sat_hi)
