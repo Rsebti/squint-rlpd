@@ -1,0 +1,47 @@
+==============================================================================
+sim_eval1 reference trace — eval1_run2 ckpt, seed=0, n_distractors=0, no_dr
+==============================================================================
+goal_color    = 0 (red)
+cube_xyz_init = [0.4180603  0.07274233 0.01      ]
+cube_xyz_final= [0.41786242 0.07266261 0.00999997]  (cube did not move)
+bin_xyz       = [1.7986237e-01 6.8336785e-02 5.5879354e-09]
+succeeded     = False
+steps         = 100
+sim time      = 9.90s
+wall time     = 1.81s
+sim/wall      = 5.48x
+
+joints: ['pan', 'lift', 'elbow', 'wrist_flex', 'wrist_roll', 'gripper']
+
+INITIAL qpos (step 0):
+  rad:  -0.0185   -0.0085   -0.0529   +1.5737   -1.5732   +1.0356
+  deg:  -1.0596   -0.4874   -3.0296  +90.1664  -90.1385  +59.3357
+FINAL qpos (step T-1):
+  rad:  -0.4149   +0.1007   -0.4828   +1.1024   -1.4378   +1.6630
+  deg: -23.7693   +5.7669  -27.6639  +63.1632  -82.3785  +95.2855
+
+joint          min(rad)   max(rad)       mean        std      range
+pan             -0.4644    +0.1604    -0.2960     0.1337     0.6248
+lift            -0.0139    +0.3592    +0.1521     0.0627     0.3730
+elbow           -0.6243    -0.0529    -0.5085     0.0949     0.5715
+wrist_flex      +0.9547    +1.5737    +1.0919     0.1031     0.6190
+wrist_roll      -1.6211    -1.2586    -1.4204     0.0856     0.3625
+gripper         +0.5572    +1.7989    +1.4739     0.2751     1.2418
+
+Tracking error |qpos - target_qpos|:
+joint           mean(rad)     max(rad)
+pan                   NaN          NaN    <- target_qpos extraction failed (NaN fallback)
+lift                  NaN          NaN    <- target_qpos extraction failed (NaN fallback)
+elbow                 NaN          NaN    <- target_qpos extraction failed (NaN fallback)
+wrist_flex            NaN          NaN    <- target_qpos extraction failed (NaN fallback)
+wrist_roll            NaN          NaN    <- target_qpos extraction failed (NaN fallback)
+gripper               NaN          NaN    <- target_qpos extraction failed (NaN fallback)
+
+Direction reversals per joint (sign changes of diff(qpos), tol=1e-5):
+joint         reversals
+pan                  23
+lift                 43
+elbow                30
+wrist_flex           29
+wrist_roll           29
+gripper              23
