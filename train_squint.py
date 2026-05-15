@@ -58,9 +58,9 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_entity: Optional[str] = None 
+    wandb_entity: Optional[str] = "fedecominelli04"
     """the entity (team) of wandb's project"""
     wandb_project_name: str = "maniskill-so101"
     """the wandb's project name"""
