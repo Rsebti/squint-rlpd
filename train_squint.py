@@ -20,7 +20,6 @@ from typing import Optional
 
 from mani_skill.utils import gym_utils
 from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper, FlattenRGBDObservationWrapper
-from mani_skill.utils.wrappers.record import RecordEpisode
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import gymnasium as gym
@@ -685,9 +684,9 @@ if __name__ == "__main__":
         eval_envs = utils.GoalColorOverlayWrapper(eval_envs)
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x: (x // max_episode_steps) % args.save_train_video_freq == 0
-            envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False,
+            envs = utils.ClockedRecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False,
                                  save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=20)
-        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory,
+        eval_envs = utils.ClockedRecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory,
                                   save_video=args.capture_video, trajectory_name="trajectory",
                                   max_steps_per_video=max_episode_steps, video_fps=20)
 

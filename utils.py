@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import cv2
 import gymnasium as gym
@@ -6,6 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision
+
+from mani_skill.utils.wrappers.record import RecordEpisode
 
 # ---------------------------  Wrappers --------------------------------------#
 
@@ -137,6 +141,55 @@ class GoalColorOverlayWrapper(gym.Wrapper):
                     (0, 0, 0), outline, cv2.LINE_AA)
         cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
                     cls.TEXT_RGB[color_idx], thickness, cv2.LINE_AA)
+
+
+class ClockedRecordEpisode(RecordEpisode):
+    """RecordEpisode with a single wall/sim clock stamped on each video frame.
+
+    The overlay is added AFTER per-env tiling, so there is exactly one clock per
+    .mp4 frame (not one per env tile). Resets each time a video is flushed.
+
+    Shows: wall-clock seconds since the video started, sim seconds (= step *
+    control_timestep), and the ratio sim/wall. >1 means sim runs faster than
+    real-time; <1 means slower.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._control_dt = float(self.base_env.control_timestep)
+        self._clock_wall_start = None
+        self._clock_sim_steps = 0
+
+    def _stamp_clock(self, img: np.ndarray) -> np.ndarray:
+        if self._clock_wall_start is None:
+            self._clock_wall_start = time.perf_counter()
+            wall_s = 0.0
+        else:
+            self._clock_sim_steps += 1
+            wall_s = time.perf_counter() - self._clock_wall_start
+        sim_s = self._clock_sim_steps * self._control_dt
+        ratio = (sim_s / wall_s) if wall_s > 0.05 else 1.0
+        text = f"wall {wall_s:5.2f}s  sim {sim_s:5.2f}s  x{ratio:4.2f}"
+        h, w = img.shape[:2]
+        scale = max(0.5, w / 900.0)
+        thickness = max(1, int(round(scale * 1.6)))
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        org = (w - tw - 10, h - 10)
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    (0, 0, 0), thickness + 2, cv2.LINE_AA)
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    (255, 255, 0), thickness, cv2.LINE_AA)
+        return img
+
+    def capture_image(self, infos=None):
+        img = super().capture_image(infos)
+        return self._stamp_clock(img)
+
+    def flush_video(self, *args, **kwargs):
+        ret = super().flush_video(*args, **kwargs)
+        self._clock_wall_start = None
+        self._clock_sim_steps = 0
+        return ret
 
 
 # ---------------------------  Extra Utils --------------------------------------#
