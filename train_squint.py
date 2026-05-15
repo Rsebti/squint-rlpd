@@ -59,8 +59,8 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_entity: Optional[str] = "fedecominelli04"
-    """the entity (team) of wandb's project"""
+    wandb_entity: Optional[str] = None
+    """the entity (team) of wandb's project. None = use the default entity from `wandb login`."""
     wandb_project_name: str = "maniskill-so101"
     """the wandb's project name"""
     wandb_group: str = "SQUINT"
