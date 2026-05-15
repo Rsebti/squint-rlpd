@@ -18,8 +18,12 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq git wget tmux htop nvtop ffmpeg
 
 if ! command -v conda &>/dev/null; then
-  wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh
-  bash /tmp/miniforge.sh -b -p "$HOME/miniforge3"
+  # NB: not /tmp — many cloud VM images mount /tmp noexec, which breaks
+  # the miniforge self-extractor.
+  INSTALLER="$HOME/miniforge.sh"
+  wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O "$INSTALLER"
+  bash "$INSTALLER" -b -p "$HOME/miniforge3"
+  rm -f "$INSTALLER"
 fi
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 
