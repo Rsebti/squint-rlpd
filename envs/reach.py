@@ -397,13 +397,13 @@ class Reach(DefaultCameraEnv):
 
 
 
-@register_env("SO101ReachCube-v1", max_episode_steps=50)
+@register_env("SO101ReachCube-v1", max_episode_steps=150)
 class ReachCube(Reach):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)
 
 
-@register_env("SO101ReachCan-v1", max_episode_steps=50)
+@register_env("SO101ReachCan-v1", max_episode_steps=150)
 class ReachCan(Reach):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="can", **kwargs)

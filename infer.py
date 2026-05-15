@@ -43,15 +43,16 @@ CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .j
 IMAGE_SIZE = 16          # CNN input H=W
 SIM_CAM_SIZE = 128       # sim wrist-camera resolution (intermediate resize)
 N_COLORS = 6             # goal-color one-hot length
-CONTROL_HZ = 30          # sim_freq=100 / control_freq=10
+CONTROL_HZ = 30          # sim sim_freq=300 / control_freq=30 (matches training)
 
-# Per-joint delta caps (rad/step): arm joints ±0.1, gripper ±0.2.
-DELTA_CAP = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.2], dtype=np.float32)
+# Per-joint delta caps (rad/step): arm joints ±0.0333, gripper ±0.0667 (30 Hz).
+# Same per-second velocity cap as the previous 10 Hz / ±0.1 setting.
+DELTA_CAP = np.array([0.0333, 0.0333, 0.0333, 0.0333, 0.0333, 0.0667], dtype=np.float32)
 # Joint limits from so101.urdf, order: pan, lift, elbow, wrist_flex, wrist_roll, gripper.
 JOINT_LOWER = np.array([-1.91986, -1.74533, -1.69, -1.65806, -2.74385, -0.174533])
 JOINT_UPPER = np.array([1.91986, 1.74533, 1.69, 1.65806, 2.84121, 2.0944])
 # SO101 "start" keyframe — robot rest pose.
-REST_QPOS = np.array([0, 0, 0, np.pi / 2, -np.pi / 2, np.deg2rad(60)], dtype=np.float32)
+REST_QPOS = np.array([0, 0, 0, np.pi / 2, 0.0, np.deg2rad(60)], dtype=np.float32)
 
 
 # �═══════════════════════════════════════════════════════════════════════════╗
@@ -213,11 +214,19 @@ def log_step(step, raw_rgb, policy_rgb, qpos, target_qpos, action_raw):
         rr.log(f"action_raw/{name}", rr.Scalars([float(action_raw[i])]))
 
 
-def build_state(qpos, target_qpos, goal_color):
-    """18-d state vector = [measured_qpos(6), controller_target_qpos(6), goal_onehot(6)]."""
+def build_state(qpos, target_qpos, goal_color, bowl_xyz=None):
+    """State vector for the policy.
+
+    Default (18-d): [measured_qpos(6), controller_target_qpos(6), goal_onehot(6)].
+    If `bowl_xyz` is given (3-d), it is appended → 21-d. Used for checkpoints
+    trained with the bowl position as an extra observation.
+    """
     onehot = np.zeros(N_COLORS, dtype=np.float32)
     onehot[goal_color] = 1.0
-    vec = np.concatenate([qpos, target_qpos, onehot]).astype(np.float32)
+    parts = [qpos, target_qpos, onehot]
+    if bowl_xyz is not None:
+        parts.append(np.asarray(bowl_xyz, dtype=np.float32))
+    vec = np.concatenate(parts).astype(np.float32)
     return torch.from_numpy(vec).unsqueeze(0)
 
 
@@ -229,10 +238,13 @@ def main():
     p.add_argument("--checkpoint", required=True, help="path to ckpt.pt")
     p.add_argument("--goal_color", type=int, default=0, help="0 red 1 blue 2 green 3 yellow 4 purple 5 orange")
     p.add_argument("--action_scale", type=float, default=0.15, help="safety multiplier on policy action (lower = slower)")
-    p.add_argument("--episode_steps", type=int, default=150, help="control steps per episode")
+    p.add_argument("--episode_steps", type=int, default=300, help="control steps per episode (300 @ 30 Hz = 10s, matches PlaceCube sim spec)")
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, default=True, help="open a Rerun viewer with live camera + joint plots (--no-viz to disable)")
     p.add_argument("--n_episodes", type=int, default=0, help="if >0, run this many episodes back-to-back without waiting for Enter")
     p.add_argument("--log_dir", type=str, default=None, help="if set, dump per-step npz logs there (one file per episode)")
+    p.add_argument("--bowl_xyz", type=float, nargs=3, default=[0.25, 0.10, 0.00],
+                   metavar=("X", "Y", "Z"),
+                   help="bowl position fed to the policy when the checkpoint expects a 21-d state (default: 0.25 0.10 0.00)")
     args = p.parse_args()
 
     if args.viz:
@@ -242,11 +254,17 @@ def main():
 
     # Load policy (only encoder + actor are needed; critic/log_alpha are training-only).
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    # Detect the state-vector width the checkpoint was trained with.
+    n_state_ckpt = ckpt["actor"]["proj.state_proj.0.weight"].shape[1]
+    use_bowl_xyz = n_state_ckpt == 21
+    if n_state_ckpt not in (18, 21):
+        raise RuntimeError(f"Unsupported state size in checkpoint: {n_state_ckpt} (expected 18 or 21)")
     encoder = CNNEncoder().to(device).eval()
-    actor = Actor().to(device).eval()
+    actor = Actor(n_state=n_state_ckpt).to(device).eval()
     encoder.load_state_dict(ckpt["encoder"])
     actor.load_state_dict(ckpt["actor"])
-    print(f"Loaded checkpoint (trained to step {ckpt.get('global_step', '?')})")
+    print(f"Loaded checkpoint (trained to step {ckpt.get('global_step', '?')}), n_state={n_state_ckpt}"
+          + (f" → feeding bowl_xyz={args.bowl_xyz}" if use_bowl_xyz else ""))
 
     # Connect robot, then build the driver (it touches robot.bus on init).
     robot = create_real_robot()
@@ -285,7 +303,10 @@ def main():
                 rgb = agent.get_sensor_data()["base_camera"]["rgb"]
 
                 obs_rgb = preprocess_image(rgb).to(device)
-                obs_state = build_state(qpos, target_qpos, args.goal_color).to(device)
+                obs_state = build_state(
+                    qpos, target_qpos, args.goal_color,
+                    bowl_xyz=args.bowl_xyz if use_bowl_xyz else None,
+                ).to(device)
 
                 with torch.no_grad():
                     raw_action = actor(encoder(obs_rgb), obs_state)[0].cpu().numpy()

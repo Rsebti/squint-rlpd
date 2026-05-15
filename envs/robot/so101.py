@@ -1,4 +1,5 @@
 import copy
+from dataclasses import dataclass
 
 import numpy as np
 import sapien
@@ -9,11 +10,185 @@ from transforms3d.euler import euler2quat
 from mani_skill import PACKAGE_ASSET_DIR
 from mani_skill.agents.base_agent import BaseAgent, Keyframe
 from mani_skill.agents.controllers import *
+from mani_skill.agents.controllers.pd_joint_pos import (
+    PDJointPosController,
+    PDJointPosControllerConfig,
+)
 from mani_skill.agents.registration import register_agent
 from mani_skill.utils import common
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
 from pathlib import Path
+
+
+# Default centred values for the real-arm-matched controller, from a
+# step-response probe on the physical SO101 (see probe_all_joints.py +
+# debug_artifacts/step_response_*.csv, 2026-05-15 calibration):
+#   measured per-joint mean: pure delay L = 60 ms, time constant tau = 55 ms
+#   R^2 >= 0.99 across all 5 arm joints
+# At dt_ctrl = 33.3 ms (30 Hz training control, matches infer.py CONTROL_HZ):
+#   delay_steps = round(60 / 33.3) = 2     (over-models L by ~7 ms)
+#   lag_alpha   = dt_ctrl / (dt_ctrl + tau) = 33.3 / 88.3 = 0.378
+# Domain-randomize around these once the controller-level DR plumbing is in.
+ACTION_DELAY_STEPS_DEFAULT = 2
+LAG_ALPHA_DEFAULT = 0.378
+
+
+class PDJointPosDelayLagController(PDJointPosController):
+    """PD joint-position controller with per-env actuator delay + lag.
+
+    Implements two real-arm effects the analytic PhysX drive misses:
+      - actuator delay: each commanded target is buffered for the env's
+        action_delay_steps control steps before reaching the drive.
+      - first-order lag: realised drive target = EMA of the delayed target;
+        alpha = dt_ctrl / (dt_ctrl + tau). alpha=1 -> no lag.
+
+    Per-env support
+    ---------------
+    Both knobs are stored as length-num_envs tensors so each parallel env
+    can run a different (delay, alpha) pair. The delay buffer is a
+    circular tensor of shape (max_delay_steps, num_envs, n_joints) sized
+    by config.max_delay_steps; each env reads from its own delay-offset
+    slot via gather. Per-env values are set externally by the env's DR
+    code via `set_per_env_dynamics(env_idx, delay_steps, lag_alpha)`.
+
+    The policy still observes the cumulative intended target via the
+    parent's use_target accumulator (when enabled), so it does not have
+    to fight the lag in its own observation/action contract.
+    """
+
+    config: "PDJointPosDelayLagControllerConfig"
+
+    # --- internal state -----------------------------------------------------
+    _delay_buffer = None         # (max_delay_steps, num_envs, n_joints)
+    _delay_head   = 0            # int; write position in circular buffer
+    _delay_per_env = None        # (num_envs,) long; per-env delay
+    _alpha_per_env = None        # (num_envs,) float; per-env lag alpha
+    _filtered_target = None      # (num_envs, n_joints); EMA state
+
+    def _ensure_state(self):
+        """Lazy-allocate per-env state. Called from reset (which sees qpos)."""
+        max_d = max(int(self.config.max_delay_steps), 1)
+        n_envs, n_j = self._target_qpos.shape
+        dev = self._target_qpos.device
+        cur = self.qpos
+        need_alloc = (
+            self._delay_buffer is None
+            or self._delay_buffer.shape != (max_d, n_envs, n_j)
+            or self._delay_per_env is None
+            or self._delay_per_env.shape != (n_envs,)
+            or self._alpha_per_env is None
+            or self._alpha_per_env.shape != (n_envs,)
+            or self._filtered_target is None
+            or self._filtered_target.shape != (n_envs, n_j)
+        )
+        if need_alloc:
+            self._delay_buffer = cur.unsqueeze(0).expand(max_d, n_envs, n_j).clone()
+            self._filtered_target = cur.clone()
+            # Default per-env values from the scalar config (DR can overwrite).
+            default_delay = min(int(self.config.action_delay_steps), max_d - 1)
+            default_delay = max(default_delay, 0)
+            self._delay_per_env = torch.full(
+                (n_envs,), default_delay, dtype=torch.long, device=dev)
+            self._alpha_per_env = torch.full(
+                (n_envs,), float(self.config.lag_alpha),
+                dtype=torch.float32, device=dev)
+            self._delay_head = 0
+
+    def reset(self):
+        super().reset()
+        self._ensure_state()
+        # Per-env reset: flush the circular buffer + EMA state for envs
+        # being reset, using their current qpos.
+        mask = self.scene._reset_mask
+        if mask is None:
+            return
+        cur = self.qpos
+        # Fill every buffer slot for the reset envs with the current pose.
+        self._delay_buffer[:, mask, :] = cur[mask].unsqueeze(0).expand_as(
+            self._delay_buffer[:, mask, :]).clone()
+        self._filtered_target[mask] = cur[mask].clone()
+
+    @torch.no_grad()
+    def set_per_env_dynamics(self, env_idx, delay_steps=None, lag_alpha=None):
+        """Hook for the env's randomizer. Writes per-env values into the
+        controller's state. Both args broadcast to (len(env_idx),).
+        """
+        self._ensure_state()
+        max_d = self._delay_buffer.shape[0]
+        if delay_steps is not None:
+            d = torch.as_tensor(delay_steps, dtype=torch.long,
+                                device=self._delay_per_env.device)
+            self._delay_per_env[env_idx] = d.clamp(0, max_d - 1)
+        if lag_alpha is not None:
+            a = torch.as_tensor(lag_alpha, dtype=torch.float32,
+                                device=self._alpha_per_env.device)
+            self._alpha_per_env[env_idx] = a.clamp(1e-3, 1.0)
+
+    def set_action(self, action):
+        self._ensure_state()
+        action = self._preprocess_action(action)
+        self._step = 0
+        self._start_qpos = self.qpos
+        # Update cumulative intended target the same way the parent does.
+        if self.config.use_delta:
+            if self.config.use_target:
+                self._target_qpos = self._target_qpos + action
+            else:
+                self._target_qpos = self._start_qpos + action
+        else:
+            self._target_qpos = torch.broadcast_to(
+                action, self._start_qpos.shape).clone()
+
+        # Per-env circular buffer: write at head, read at (head - delay).
+        max_d = self._delay_buffer.shape[0]
+        self._delay_buffer[self._delay_head] = self._target_qpos
+        read_pos = (self._delay_head - self._delay_per_env) % max_d   # (num_envs,)
+        env_arange = torch.arange(self._target_qpos.shape[0],
+                                  device=self._target_qpos.device)
+        delayed = self._delay_buffer[read_pos, env_arange]            # (num_envs, n_j)
+        self._delay_head = (self._delay_head + 1) % max_d
+
+        # Per-env first-order lag (broadcast alpha over joints).
+        alpha = self._alpha_per_env.unsqueeze(-1)                     # (num_envs, 1)
+        self._filtered_target = (1.0 - alpha) * self._filtered_target + alpha * delayed
+
+        if self.config.interpolate:
+            self._step_size = (
+                self._filtered_target - self._start_qpos
+            ) / self._sim_steps
+        else:
+            self.set_drive_targets(self._filtered_target)
+
+    def before_simulation_step(self):
+        self._step += 1
+        if self.config.interpolate:
+            targets = self._start_qpos + self._step_size * self._step
+            self.set_drive_targets(targets)
+
+
+@dataclass
+class PDJointPosDelayLagControllerConfig(PDJointPosControllerConfig):
+    """PDJointPosControllerConfig + per-env delay & first-order lag knobs.
+
+    `action_delay_steps` and `lag_alpha` are the *default* (centre) values
+    used when no domain-randomization writes per-env overrides. The DR
+    pathway (BaseRandomEnv._randomize_arm_controller) calls
+    `controller.set_per_env_dynamics(env_idx, delay, alpha)` to sample new
+    values per reset.
+
+    `max_delay_steps` sizes the circular delay buffer. Set it to the upper
+    bound of action_delay_steps_range so randomization can sample up to
+    that depth at runtime without re-allocation.
+    """
+
+    action_delay_steps: int = ACTION_DELAY_STEPS_DEFAULT
+    """Default control-rate FIFO depth (overridden per-env by DR)."""
+    lag_alpha: float = LAG_ALPHA_DEFAULT
+    """Default EMA mix per control step (overridden per-env by DR)."""
+    max_delay_steps: int = 5
+    """Capacity of the circular delay buffer (= upper bound of any per-env delay). 5 at 30 Hz = ~165 ms."""
+    controller_cls = PDJointPosDelayLagController
 
 
 @register_agent()
@@ -54,7 +229,7 @@ class SO101(BaseAgent):
         ),
         start=Keyframe(
             qpos=np.array(
-                [0, 0, 0, np.pi / 2, -np.pi / 2, 60 * np.pi / 180] # sligtly open gripper
+                [0, 0, 0, np.pi / 2, 0.0, 60 * np.pi / 180] # sligtly open gripper
             ),  # Cam up, fully open gripper
             pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
         ),
@@ -89,19 +264,22 @@ class SO101(BaseAgent):
             upper=None,
             stiffness=1e3,
             damping=1e2,
-            force_limit=100,
+            force_limit=3.0,
             normalize_action=False,
         )
 
-        # Arm joint delta caps at ±0.1 rad/step (10 Hz = ~57 deg/s). Gripper
-        # delta cap ±0.2 so grasping still closes/opens quickly.
-        pd_joint_delta_pos = PDJointPosControllerConfig(
+        # Arm joint delta caps at ±0.0333 rad/step (30 Hz = ~57 deg/s,
+        # same wrist speed cap as the previous 10 Hz config). Gripper
+        # delta cap ±0.0667 so grasping still closes/opens quickly.
+        # Uses the delay+lag controller so the sim plant approximates the
+        # Feetech STS3215's serial-bus latency + on-board PID response.
+        pd_joint_delta_pos = PDJointPosDelayLagControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.1, -0.1, -0.1, -0.1, -0.1, -0.2],
-            [0.1, 0.1, 0.1, 0.1, 0.1, 0.2],
+            [-0.0333, -0.0333, -0.0333, -0.0333, -0.0333, -0.0667],
+            [ 0.0333,  0.0333,  0.0333,  0.0333,  0.0333,  0.0667],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
-            force_limit=100,
+            force_limit=3.0,
             use_delta=True,
             use_target=False,
         )
@@ -114,8 +292,8 @@ class SO101(BaseAgent):
             [joint.name for joint in self.robot.active_joints],
             lower=[-1.0, -1.0, -1.0, -1.0, -1.0, -5.0],
             upper=[1.0, 1.0, 1.0, 1.0, 1.0, 5.0],
-            damping=[1e2] * 6,  
-            force_limit=100,
+            damping=[1e2] * 6,
+            force_limit=3.0,
             friction=0,
             normalize_action=True
         )

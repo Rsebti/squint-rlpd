@@ -43,6 +43,39 @@ NUM_COLORS = len(COLOR_PALETTE)
 SCENE_NEUTRAL_RGB = (164 / 255.0, 166 / 255.0, 170 / 255.0)
 
 
+def _rgb_to_hsv_np(rgb):
+    """Scalar RGB->HSV in [0,1] (rgb in [0,1]). Mirrors torch helper in
+    base_random_env._rgb_to_hsv but for a single (R, G, B) triplet."""
+    r, g, b = float(rgb[0]), float(rgb[1]), float(rgb[2])
+    mx, mn = max(r, g, b), min(r, g, b)
+    v = mx
+    d = mx - mn
+    s = 0.0 if mx == 0 else d / mx
+    if d == 0:
+        h = 0.0
+    elif mx == r:
+        h = ((g - b) / d) % 6.0
+    elif mx == g:
+        h = (b - r) / d + 2.0
+    else:
+        h = (r - g) / d + 4.0
+    return (h / 6.0) % 1.0, s, v
+
+
+def _hsv_to_rgb_np(h, s, v):
+    """Scalar HSV->RGB in [0,1]."""
+    i = int(h * 6.0) % 6
+    f = h * 6.0 - int(h * 6.0)
+    p = v * (1.0 - s)
+    q = v * (1.0 - f * s)
+    t = v * (1.0 - (1.0 - f) * s)
+    return [
+        (v, t, p, p, t, v)[i],
+        (t, v, v, q, p, p)[i],
+        (p, p, t, v, v, q)[i],
+    ]
+
+
 class FlatTableSceneBuilder(TableSceneBuilder):
     """Table with the decorative GLB visual replaced by a flat matte box.
 
@@ -140,28 +173,44 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
 
     # Friction for the cubes (painted wood — can be quite slippery).
     item_friction_range: Sequence[float] = (0.2, 0.6)
+    # Restitution for the cubes (mostly inelastic; small bounce tolerated).
+    item_restitution_range: Sequence[float] = (0.0, 0.2)
     # Mass range in kg. Sampled directly per env; the per-env density passed
     # to SAPIEN is then mass / volume, so the mass is hard-bounded regardless
     # of cube_half_size_range. Real measured cube weight ≈ 4.5 g, so the
     # range straddles it symmetrically.
     item_mass_range: Sequence[float] = (0.003, 0.006)
+    # Friction + restitution for the bowl (was hardcoded 0.5 / 0.0).
+    bowl_friction_range: Sequence[float] = (0.3, 1.0)
+    bowl_restitution_range: Sequence[float] = (0.0, 0.2)
     # Friction for the table top. Fixed at 0.5 (no randomization) so contacts
     # average a clean 0.5 against cubes and the bowl.
     table_friction_range: Sequence[float] = (0.3, 0.5)
     randomize_item_color: bool = False
 
-    # Slight per-episode DR on the cube materials (goal + distractors): a small
-    # color jitter plus randomized PBR render params, so the cubes aren't
-    # rendered identically every episode. Kept subtle — the goal color must
-    # stay recognizable to the goal-conditioned policy.
-    item_color_jitter: float = 0.06
-    """Max per-channel multiplicative jitter on the cube's palette color."""
+    # Per-episode DR on the cube materials (goal + distractors). HSV-based so
+    # the goal-conditioned policy still sees a recognisable hue — only
+    # saturation and value (brightness) jitter; hue is locked.
+    item_sat_jitter: float = 0.10
+    """Half-range of per-episode multiplicative jitter on cube HSV saturation. ±10% by default."""
+    item_value_jitter: float = 0.10
+    """Half-range of per-episode multiplicative jitter on cube HSV value (brightness). ±10% by default."""
     item_roughness_range: Sequence[float] = (0.35, 0.7)
     """Per-episode cube material roughness (matte <-> slightly glossy)."""
     item_metallic_range: Sequence[float] = (0.0, 0.15)
     """Per-episode cube material metallic (kept low — painted wood is non-metallic)."""
     item_specular_range: Sequence[float] = (0.3, 0.7)
     """Per-episode cube material specular reflection strength."""
+
+    # Per-episode DR on the bowl material. Bowl uses baked vertex colors;
+    # we apply a per-episode HSV-shifted tint via base_color (PBR multiplies
+    # base_color * vertex_color, so this acts as a global tint).
+    bowl_hue_jitter_deg: float = 10.0
+    """Half-range of per-episode bowl hue shift in degrees (±)."""
+    bowl_sat_jitter: float = 0.10
+    """Half-range of per-episode multiplicative jitter on bowl HSV saturation. ±10% by default."""
+    bowl_value_jitter: float = 0.10
+    """Half-range of per-episode multiplicative jitter on bowl HSV value. ±10% by default."""
 
 
 class Place(DefaultCameraEnv):
@@ -199,8 +248,18 @@ class Place(DefaultCameraEnv):
         domain_randomization=False,
         spawn_box_pos=[0.3, 0],
         spawn_box_half_size=0.25 / 2,
+        action_smooth_coef: float = 0.67,
         **kwargs,
     ):
+        # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
+        # the dense reward. Sized for 30 Hz control: coef=0.67 keeps the
+        # per-second jitter cost the same as the previous 10 Hz / coef=2.0
+        # tuning (penalty/sec is N_steps_per_sec * coef * <||delta||^2>).
+        # _last_action is lazily initialised on first reward call when
+        # num_envs/device are known.
+        self.action_smooth_coef = float(action_smooth_coef)
+        self._last_action = None
+        self._just_reset_mask = None
         if not (0 <= n_distractors <= 4):
             # Distractors are placed face-to-face on the target's 4 cardinal
             # faces (one per face), so the geometry caps at 4.
@@ -307,6 +366,7 @@ class Place(DefaultCameraEnv):
         colors = np.tile(COLOR_PALETTE[0], (self.num_envs, 1))  # default red
         cfg = self.domain_randomization_config
         frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
+        restitutions = np.ones(self.num_envs) * (cfg.item_restitution_range[0] + cfg.item_restitution_range[1]) / 2
         mass_mid = (cfg.item_mass_range[0] + cfg.item_mass_range[1]) / 2
         masses = np.ones(self.num_envs) * mass_mid
 
@@ -329,6 +389,10 @@ class Place(DefaultCameraEnv):
                 frictions = self._batched_episode_rng.uniform(
                     low=cfg.item_friction_range[0],
                     high=cfg.item_friction_range[1],
+                )
+                restitutions = self._batched_episode_rng.uniform(
+                    low=cfg.item_restitution_range[0],
+                    high=cfg.item_restitution_range[1],
                 )
                 masses = self._batched_episode_rng.uniform(
                     low=cfg.item_mass_range[0],
@@ -374,6 +438,10 @@ class Place(DefaultCameraEnv):
                     low=cfg.item_friction_range[0],
                     high=cfg.item_friction_range[1],
                 )
+                restitutions = self._batched_episode_rng.uniform(
+                    low=cfg.item_restitution_range[0],
+                    high=cfg.item_restitution_range[1],
+                )
                 masses = self._batched_episode_rng.uniform(
                     low=cfg.item_mass_range[0],
                     high=cfg.item_mass_range[1],
@@ -387,6 +455,7 @@ class Place(DefaultCameraEnv):
 
         colors = np.concatenate([colors, np.ones((self.num_envs, 1))], axis=-1)
         self.item_frictions = common.to_tensor(frictions, device=self.device)
+        self.item_restitutions = common.to_tensor(restitutions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
         self.item_masses = common.to_tensor(masses, device=self.device)
 
@@ -398,7 +467,7 @@ class Place(DefaultCameraEnv):
             material = sapien.pysapien.physx.PhysxMaterial(
                 static_friction=friction,
                 dynamic_friction=friction,
-                restitution=0,
+                restitution=float(restitutions[i]),
             )
 
             if self.item_type == "cube":
@@ -503,6 +572,23 @@ class Place(DefaultCameraEnv):
         self.bin_half_sizes_z = common.to_tensor(bin_half_sizes_z, device=self.device)
         self.bin_dimensions = torch.stack([self.bin_half_sizes_x, self.bin_half_sizes_y, self.bin_half_sizes_z], dim=-1)
 
+        # Per-env bowl friction + restitution (only consumed when use_real_bowl,
+        # but kept symmetric so downstream code can read uniformly).
+        if self.domain_randomization:
+            bowl_frictions = self._batched_episode_rng.uniform(
+                low=cfg.bowl_friction_range[0], high=cfg.bowl_friction_range[1],
+            )
+            bowl_restitutions = self._batched_episode_rng.uniform(
+                low=cfg.bowl_restitution_range[0], high=cfg.bowl_restitution_range[1],
+            )
+        else:
+            bowl_frictions = np.ones(self.num_envs) * (
+                cfg.bowl_friction_range[0] + cfg.bowl_friction_range[1]) / 2
+            bowl_restitutions = np.ones(self.num_envs) * (
+                cfg.bowl_restitution_range[0] + cfg.bowl_restitution_range[1]) / 2
+        self.bowl_frictions = common.to_tensor(bowl_frictions, device=self.device)
+        self.bowl_restitutions = common.to_tensor(bowl_restitutions, device=self.device)
+
         bins = []
         for i in range(self.num_envs):
             builder = self.scene.create_actor_builder()
@@ -510,7 +596,9 @@ class Place(DefaultCameraEnv):
                 # Dynamic actor with CoACD-decomposed collision and the real
                 # mesh visual. Origin is at the bowl bottom-center.
                 bowl_material = sapien.pysapien.physx.PhysxMaterial(
-                    static_friction=0.5, dynamic_friction=0.5, restitution=0.0,
+                    static_friction=float(bowl_frictions[i]),
+                    dynamic_friction=float(bowl_frictions[i]),
+                    restitution=float(bowl_restitutions[i]),
                 )
                 builder.add_multiple_convex_collisions_from_file(
                     filename=mesh_path,
@@ -657,11 +745,17 @@ class Place(DefaultCameraEnv):
                 continue
             rng = self._batched_episode_rng[i]
             rgb = COLOR_PALETTE[int(color_idxs_list[k])].astype(np.float32)
-            # Slight per-episode color jitter (small, so the goal color stays
-            # recognizable to the goal-conditioned policy).
-            if dr and cfg.item_color_jitter > 0:
-                j = cfg.item_color_jitter
-                rgb = np.clip(rgb * rng.uniform(1.0 - j, 1.0 + j, size=(3,)), 0.0, 1.0)
+            # HSV-correct per-episode jitter: lock hue (goal-color semantics)
+            # and only perturb saturation and value. Keeps the goal color
+            # recognisable to the goal-conditioned policy while still
+            # bracketing real-camera color drift.
+            if dr and (cfg.item_sat_jitter > 0 or cfg.item_value_jitter > 0):
+                h, s, v = _rgb_to_hsv_np(rgb)
+                s = float(np.clip(s * rng.uniform(
+                    1.0 - cfg.item_sat_jitter, 1.0 + cfg.item_sat_jitter), 0.0, 1.0))
+                v = float(np.clip(v * rng.uniform(
+                    1.0 - cfg.item_value_jitter, 1.0 + cfg.item_value_jitter), 0.0, 1.0))
+                rgb = np.array(_hsv_to_rgb_np(h, s, v), dtype=np.float32)
             rgba = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0]
             # A bit of emissive glow (domain-randomized per episode) so the cube
             # color stays readable across the wide brightness DR range.
@@ -682,6 +776,40 @@ class Place(DefaultCameraEnv):
                     part.material.set_roughness(roughness)
                     part.material.set_metallic(metallic)
                     part.material.set_specular(specular)
+
+    def _randomize_bowl_tint(self, env_idx: torch.Tensor):
+        """Per-episode HSV tint on the bowl's render material. Hue ±h°,
+        saturation ±sj, value ±vj. PBR multiplies base_color * vertex_color,
+        so this tints the baked .ply colors without erasing them.
+
+        DR off: leaves base_color at (1,1,1) (no tint)."""
+        if self.bin is None:
+            return
+        cfg = self.domain_randomization_config
+        dr = self.domain_randomization
+        env_idx_list = env_idx.tolist() if isinstance(env_idx, torch.Tensor) else list(env_idx)
+        for i in env_idx_list:
+            obj = self.bin._objs[i]
+            entity = getattr(obj, "entity", obj)
+            comp = entity.find_component_by_type(RenderBodyComponent)
+            if comp is None:
+                continue
+            if dr:
+                rng = self._batched_episode_rng[i]
+                h_shift = rng.uniform(-cfg.bowl_hue_jitter_deg, cfg.bowl_hue_jitter_deg) / 360.0
+                s_scale = rng.uniform(1.0 - cfg.bowl_sat_jitter, 1.0 + cfg.bowl_sat_jitter)
+                v_scale = rng.uniform(1.0 - cfg.bowl_value_jitter, 1.0 + cfg.bowl_value_jitter)
+                # Build a near-white tint: HSV(h_shift, |h_shift|*sat_intensity, v_scale).
+                # The small saturation makes the tint visible as a hue cast
+                # without overpowering the baked vertex colors.
+                tint_sat = float(np.clip(abs(h_shift) * 6.0 * s_scale, 0.0, 0.25))
+                r, g, b = _hsv_to_rgb_np((h_shift % 1.0), tint_sat, float(np.clip(v_scale, 0.0, 1.5)))
+                rgba = [float(r), float(g), float(b), 1.0]
+            else:
+                rgba = [1.0, 1.0, 1.0, 1.0]
+            for render_shape in comp.render_shapes:
+                for part in render_shape.parts:
+                    part.material.set_base_color(rgba)
 
     def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
         """Sample goal_color_idx (honoring options) and n_distractors distractor
@@ -722,6 +850,12 @@ class Place(DefaultCameraEnv):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
             self.table_scene.table.set_pose(self.table_pose)
+
+            # Mark the just-reset envs so the action-rate penalty pays zero
+            # on the first step of a new episode (it'd otherwise charge the
+            # magnitude of a_0 instead of a true rate ||a_t - a_{t-1}||).
+            if self._just_reset_mask is not None:
+                self._just_reset_mask[env_idx] = True
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -838,6 +972,12 @@ class Place(DefaultCameraEnv):
             bin_xyz[:, 2] = self.bin_thickness / 2
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
+
+            # Per-episode bowl color tint (hue ±10°, sat ±10%, value ±10%).
+            # PBR multiplies base_color × vertex_color, so this tints the
+            # baked .ply colors without flattening them.
+            if self.use_real_bowl:
+                self._randomize_bowl_tint(env_idx)
 
             # Goal is above bin center (above-rim for bowl, at-floor for parametric)
             goal_xyz = bin_xyz.clone()
@@ -978,6 +1118,26 @@ class Place(DefaultCameraEnv):
         reward -= 3 * info["robot_touching_bin"].float()
         reward -= 1 * (~info["item_lifted"]).float()  # Encourage picking item fast
 
+        # Action-rate penalty (CAPS-style): -coef * ||a_t - a_{t-1}||^2 per env.
+        # Suppresses high-frequency policy jitter that a stiff PhysX drive
+        # silently absorbs but a real Feetech servo cannot follow, producing
+        # oscillation at deployment. coef ~2.0 places it at ~15-20% of the
+        # dense reward for a jittery policy and ~0.3% once smooth.
+        if self.action_smooth_coef > 0 and torch.is_tensor(action):
+            if self._last_action is None or self._last_action.shape != action.shape:
+                self._last_action = torch.zeros_like(action)
+                self._just_reset_mask = torch.ones(
+                    action.shape[0], dtype=torch.bool, device=action.device
+                )
+            # On freshly-reset envs, treat last_action as the current action
+            # so the first-step rate is zero (otherwise we'd penalize ||a_0||).
+            fresh = self._just_reset_mask
+            if fresh.any():
+                self._last_action[fresh] = action[fresh].detach()
+                self._just_reset_mask[:] = False
+            delta = action - self._last_action
+            reward = reward - self.action_smooth_coef * (delta * delta).sum(dim=-1)
+            self._last_action = action.detach().clone()
 
         return reward
 
@@ -987,13 +1147,13 @@ class Place(DefaultCameraEnv):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 9
 
 
-@register_env("SO101PlaceCube-v1", max_episode_steps=100)
+@register_env("SO101PlaceCube-v1", max_episode_steps=300)
 class PlaceCube(Place):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)
 
 
-@register_env("SO101PlaceCan-v1", max_episode_steps=50)
+@register_env("SO101PlaceCan-v1", max_episode_steps=150)
 class PlaceCan(Place):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="can", **kwargs)

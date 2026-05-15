@@ -107,8 +107,10 @@ class Args:
     """override max episode steps for evaluation only (0 = use env spec)"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
-    control_mode: Optional[str] = None 
+    control_mode: Optional[str] = None
     """the control mode to use for the environment"""
+    action_smooth_coef: float = 0.67
+    """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Sized for 30 Hz control (was 2.0 at 10 Hz; coef / freq preserves per-second jitter cost). Set 0 to disable."""
     obs_mode: Optional[str] = "rgb"
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"
@@ -147,8 +149,8 @@ class Args:
     """automatic tuning of the entropy coefficient"""
     bootstrap_at_done: str = "always"
     """bootstrap method when episode ends. Options: ['always', 'never', 'on_truncation']"""
-    gamma: float = 0.9
-    """the discount factor gamma"""
+    gamma: float = 0.965
+    """the discount factor gamma per step. 0.965 at 30 Hz control preserves the per-second discount of the previous 0.9 at 10 Hz (0.9 ** (1/3))."""
     tau: float = 0.01
     """target smoothing coefficient"""
     num_q: int = 2
@@ -648,6 +650,8 @@ if __name__ == "__main__":
         eval_env_kwargs["n_distractors"] = args.n_distractors
         env_kwargs["use_real_bowl"] = args.use_real_bowl
         eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
+        env_kwargs["action_smooth_coef"] = args.action_smooth_coef
+        eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
 
     _make_steps = args.eval_max_episode_steps if args.eval_max_episode_steps > 0 else None
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,

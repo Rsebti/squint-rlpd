@@ -50,14 +50,28 @@ from transforms3d.quaternions import qmult
 @dataclass
 class RandomizationConfig:
     # === Static settings (not affected by domain_randomization flag) ===
-    initial_qpos_noise_scale: float = 0.02
-    """Noise scale for initial robot joint positions."""
+    initial_qpos_noise_scale: float = np.deg2rad(10)
+    """Std of Gaussian initial-qpos noise (per joint, rad). 1σ = 10°: ~68%
+    of samples within ±10°, tails extending further for robustness."""
 
     # === Common randomization settings (affected by domain_randomization flag) ===
     gripper_stiffness_range: Sequence[float] = (500, 2000)
     """Range for gripper joint stiffness randomization (per-episode)."""
     gripper_damping_range: Sequence[float] = (50, 200)
     """Range for gripper joint damping randomization (per-episode)."""
+
+    # === Arm-controller DR (matches real Feetech servo characteristics) ===
+    # Centred on the 2026-05-15 step-response calibration (delay 60 ms /
+    # tau 55 ms @ 30 Hz control -> delay_steps=2, lag_alpha=0.378). Ranges
+    # bracket realistic per-arm / per-load variation.
+    arm_stiffness_range: Sequence[float] = (700.0, 1300.0)
+    """Range for arm joint stiffness randomization (per-episode). Centre 1e3."""
+    arm_damping_range: Sequence[float] = (70.0, 130.0)
+    """Range for arm joint damping randomization (per-episode). Centre 1e2."""
+    action_delay_steps_range: Sequence[int] = (1, 3)
+    """Inclusive integer range for per-env actuator delay (in control steps). Must lie within [0, max_delay_steps-1] of the controller config (default max 5)."""
+    lag_alpha_range: Sequence[float] = (0.30, 0.45)
+    """Range for per-env first-order-lag EMA mix. Centre 0.378."""
     robot_color: Optional[Union[str, Sequence[float]]] = (0.0, 0.0, 0.0)
     """Robot color in RGB (0-1). Set to "random" for per-episode randomization."""
     randomize_lighting: bool = True
@@ -68,16 +82,22 @@ class RandomizationConfig:
     # couple of point lights (local highlights). Every level is re-sampled per
     # episode, then all are scaled by one global exposure multiplier. The lights
     # are always WHITE — only their intensity is randomized, never their hue.
-    room_brightness_range: Sequence[float] = (0.25, 0.62)
-    """Per-episode ambient fill level — the global, uniform room brightness."""
+    room_brightness_range: Sequence[float] = (0.10, 0.30)
+    """Per-episode ambient fill level — the global, uniform room brightness.
+    Lowered so the key light dominates and each cube face shows a distinct
+    Lambertian shade (matches real-world desk lighting where lit:shadow
+    contrast is roughly 3–8×)."""
     exposure_range: Sequence[float] = (0.55, 1.45)
     """Per-episode global exposure multiplier applied on top of every light."""
     num_directional_lights: int = 3
     """Directional lights per sub-scene (light 0 is the brighter 'key' light)."""
-    directional_key_intensity_range: Sequence[float] = (0.15, 0.45)
-    """Key directional light intensity, before the exposure multiplier."""
-    directional_fill_intensity_range: Sequence[float] = (0.0, 0.18)
-    """Fill directional light intensity, before the exposure multiplier (can drop to ~0)."""
+    directional_key_intensity_range: Sequence[float] = (0.45, 0.85)
+    """Key directional light intensity, before the exposure multiplier.
+    Raised together with the lowered ambient to drive a clear per-face
+    shading gradient (3–5× lit:shadow ratio)."""
+    directional_fill_intensity_range: Sequence[float] = (0.05, 0.25)
+    """Fill directional light intensity, before the exposure multiplier.
+    Kept above zero so the shadow side never goes pure-ambient flat."""
     num_point_lights: int = 2
     """Point lights per sub-scene, at random positions above the workspace."""
     point_light_intensity_range: Sequence[float] = (0.0, 0.3)
@@ -99,12 +119,45 @@ class RandomizationConfig:
     """Noise scale for camera FOV."""
 
     # === Wrist camera settings (only used by WristCameraEnv) ===
-    wrist_camera_pos_noise: Sequence[float] = (0.002, 0.002, 0.002)
-    """Max position noise (x, y, z) relative to gripper."""
-    wrist_camera_rot_noise: Sequence[float] = (np.deg2rad(1), np.deg2rad(1), np.deg2rad(1))
-    """Max rotation noise (roll, pitch, yaw) in radians."""
-    wrist_camera_fov_noise: float = np.deg2rad(1)
-    """Noise scale for camera FOV. Base FOV is 71 degrees."""
+    # Centred to bracket realistic mount slop / hand-held re-fit error on the
+    # SO101 wrist mount. Widened 2026-05 to cover the larger sim-to-real
+    # extrinsic mismatch we observed at deploy.
+    wrist_camera_pos_noise: Sequence[float] = (0.010, 0.010, 0.010)
+    """Max position noise (x, y, z) in metres, applied per control step relative to the gripper. ±10 mm covers re-clipping / mount flex."""
+    wrist_camera_rot_noise: Sequence[float] = (np.deg2rad(5), np.deg2rad(5), np.deg2rad(5))
+    """Max rotation noise (roll, pitch, yaw) in radians, applied per control step. ±5° covers mount-bolt rotational play."""
+    wrist_camera_fov_noise: float = np.deg2rad(3)
+    """Per-episode FOV noise (radians) around the base 71°. ±3° spans common phone-cam / USB-cam intrinsic variation."""
+    wrist_camera_roll_discrete: bool = False
+    """If True, additionally jitter wrist-camera roll over the discrete set {0°, 90°, 180°, 270°} per episode. Use for a robustness-phase curriculum: trains the policy to handle a misoriented wrist camera. Continuous roll noise (wrist_camera_rot_noise[0]) is applied on top of the discrete choice."""
+
+    # === Observation latency (camera lag) ===
+    # Measured 2026-05-15: ~49.4 ms camera-only lag at 30 Hz control
+    # (cmd -> first visual motion - cmd -> servo motion). Range (1, 2)
+    # corresponds to ~33-66 ms in 33.3 ms slots, ±17 ms half-spread.
+    obs_delay_steps_range: Sequence[int] = (1, 2)
+    """Inclusive integer range for per-env observation (RGB) delay in control steps. Centre is 1 → ~33 ms at 30 Hz; bracketing the measured 49 ms ± frame quantisation."""
+    max_obs_delay_steps: int = 3
+    """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
+
+    # === Image-pipeline domain randomization ===
+    # Applied to every RGB sensor frame BEFORE the policy sees it, to bracket
+    # the photometric gap between PhysX-rendered images and real USB-cam
+    # output (white balance, gamma, sensor noise, hue/sat drift).
+    image_noise_sigma_range: Sequence[float] = (0.01, 0.04)
+    """Per-episode std of additive Gaussian noise on RGB in [0,1] scale. Resampled each step from the same per-env sigma."""
+    image_channel_gain_range: Sequence[float] = (0.85, 1.15)
+    """Per-channel multiplicative gain (R, G, B independent). Models white-balance drift between cameras."""
+    image_gamma_range: Sequence[float] = (0.8, 1.2)
+    """Per-episode gamma exponent applied to pixel values in [0, 1]. <1 lightens, >1 darkens."""
+    image_jpeg_quality_range: Sequence[float] = (50, 95)
+    """Per-episode JPEG quality (used by the image-pipeline DR wrapper when JPEG roundtripping is enabled). NB: actual JPEG roundtrip is not yet wired into _apply_image_pipeline_dr because it requires a CPU bounce; left here as a hook for a future wrapper."""
+    image_jpeg_probability: float = 0.2
+    """Probability per episode that JPEG roundtripping is applied. Bracket of common deploy-side stream compression. Currently informational (see image_jpeg_quality_range note)."""
+    image_hue_shift_deg: float = 5.0
+    """Half-range of per-episode hue shift in degrees (±). Applied uniformly to the whole frame each step."""
+    image_saturation_range: Sequence[float] = (0.7, 1.3)
+    """Per-episode saturation scale in HSV. <1 desaturates, >1 supersaturates."""
 
     def dict(self):
         return {k: v for k, v in asdict(self).items()}
@@ -146,7 +199,7 @@ class BaseRandomEnv(BaseEnv):
 
     @property
     def _default_sim_config(self):
-        return SimConfig(sim_freq=100, control_freq=10)
+        return SimConfig(sim_freq=300, control_freq=30)
 
     @property
     def _default_human_render_camera_configs(self):
@@ -366,7 +419,7 @@ class BaseRandomEnv(BaseEnv):
         gripper_joint = self.agent.robot.joints_map["gripper"]
 
         for i, idx in enumerate(env_idx.tolist()):
-            gripper_joint._objs[idx].set_drive_properties(stiffnesses[i], dampings[i], force_limit=100)
+            gripper_joint._objs[idx].set_drive_properties(stiffnesses[i], dampings[i], force_limit=3.0)
             self._gripper_stiffness[idx] = stiffnesses[i]
             self._gripper_damping[idx] = dampings[i]
 
@@ -382,6 +435,384 @@ class BaseRandomEnv(BaseEnv):
             "gripper_stiffness": (self._gripper_stiffness - stiff_lo) / stiff_range,
             "gripper_damping": (self._gripper_damping - damp_lo) / damp_range,
         }
+
+    # ── Arm controller DR ───────────────────────────────────────────────────
+    # Mirrors _randomize_gripper_speed but for the five arm joints plus the
+    # delay/lag parameters of the PDJointPosDelayLagController. Always called
+    # at episode init: when domain_randomization is False it just lazily
+    # allocates the per-env tensors with the centre (default) values so
+    # downstream code can read them uniformly.
+    _ARM_JOINT_NAMES = (
+        "shoulder_pan", "shoulder_lift", "elbow_flex",
+        "wrist_flex",   "wrist_roll",
+    )
+
+    def _get_arm_delay_lag_controller(self):
+        """Locate the PDJointPosDelayLagController inside the agent's
+        controller chain. Returns None if the current control mode does not
+        use the delay/lag controller (e.g. pd_joint_pos, pd_joint_vel)."""
+        from .robot.so101 import PDJointPosDelayLagController
+        ctrl = getattr(self.agent, "controller", None)
+        if ctrl is None:
+            return None
+        # mani_skill's CombinedController exposes .controllers as a dict.
+        sub = getattr(ctrl, "controllers", None)
+        if isinstance(sub, dict):
+            for c in sub.values():
+                if isinstance(c, PDJointPosDelayLagController):
+                    return c
+        if isinstance(ctrl, PDJointPosDelayLagController):
+            return ctrl
+        return None
+
+    def _randomize_arm_controller(self, env_idx: torch.Tensor):
+        """Per-episode randomization of arm-joint stiffness/damping and the
+        delay/lag controller's per-env (delay_steps, lag_alpha)."""
+        cfg = self.domain_randomization_config
+        stiff_lo, stiff_hi = cfg.arm_stiffness_range
+        damp_lo,  damp_hi  = cfg.arm_damping_range
+        d_lo,     d_hi     = cfg.action_delay_steps_range
+        a_lo,     a_hi     = cfg.lag_alpha_range
+
+        # Lazy-allocate per-env storage with centre values (for both DR-off
+        # and the privileged-obs path). Centres = midpoint of each range so
+        # the normalised privileged obs is 0.5 when randomization is off.
+        if not hasattr(self, "_arm_stiffness"):
+            self._arm_stiffness = torch.full(
+                (self.num_envs, len(self._ARM_JOINT_NAMES)),
+                (stiff_lo + stiff_hi) / 2, device=self.device)
+            self._arm_damping = torch.full(
+                (self.num_envs, len(self._ARM_JOINT_NAMES)),
+                (damp_lo + damp_hi) / 2, device=self.device)
+            self._arm_action_delay = torch.full(
+                (self.num_envs,), int(round((d_lo + d_hi) / 2)),
+                dtype=torch.long, device=self.device)
+            self._arm_lag_alpha = torch.full(
+                (self.num_envs,), (a_lo + a_hi) / 2,
+                dtype=torch.float32, device=self.device)
+
+        controller = self._get_arm_delay_lag_controller()
+
+        if not self.domain_randomization:
+            return
+        # Nothing to do if all four ranges collapse to a point.
+        flat = (stiff_lo == stiff_hi and damp_lo == damp_hi
+                and d_lo == d_hi and a_lo == a_hi)
+        if flat:
+            return
+
+        # Sample per env in env_idx
+        n = len(env_idx)
+        stiffs = self._batched_episode_rng[env_idx].uniform(stiff_lo, stiff_hi)
+        damps  = self._batched_episode_rng[env_idx].uniform(damp_lo, damp_hi)
+        # Delay sampled as float in [d_lo, d_hi+1), then floored to int so
+        # each integer in [d_lo, d_hi] is sampled with equal probability.
+        delays_f = self._batched_episode_rng[env_idx].uniform(
+            float(d_lo), float(d_hi) + 1.0 - 1e-6)
+        delays = np.clip(np.floor(delays_f).astype(np.int64), d_lo, d_hi)
+        alphas = self._batched_episode_rng[env_idx].uniform(a_lo, a_hi)
+
+        # Write per-env stiffness/damping to each arm joint, mirroring the
+        # gripper pattern. _objs[idx] gives the per-env handle for set_drive_properties.
+        for j_name in self._ARM_JOINT_NAMES:
+            joint = self.agent.robot.joints_map[j_name]
+            for i, idx in enumerate(env_idx.tolist()):
+                joint._objs[idx].set_drive_properties(
+                    float(stiffs[i]), float(damps[i]), force_limit=3.0)
+
+        idx_t = env_idx.to(self.device)
+        j_arange = torch.arange(len(self._ARM_JOINT_NAMES), device=self.device)
+        stiff_t = torch.as_tensor(stiffs, dtype=torch.float32, device=self.device)
+        damp_t  = torch.as_tensor(damps,  dtype=torch.float32, device=self.device)
+        self._arm_stiffness[idx_t.unsqueeze(-1), j_arange.unsqueeze(0)] = stiff_t.unsqueeze(-1)
+        self._arm_damping[idx_t.unsqueeze(-1),  j_arange.unsqueeze(0)] = damp_t.unsqueeze(-1)
+        self._arm_action_delay[idx_t] = torch.as_tensor(
+            delays, dtype=torch.long, device=self.device)
+        self._arm_lag_alpha[idx_t]    = torch.as_tensor(
+            alphas, dtype=torch.float32, device=self.device)
+
+        # Push the new (delay, alpha) into the controller's per-env state.
+        if controller is not None:
+            controller.set_per_env_dynamics(
+                env_idx=idx_t,
+                delay_steps=self._arm_action_delay[idx_t],
+                lag_alpha=self._arm_lag_alpha[idx_t],
+            )
+
+    def get_arm_controller_params(self) -> dict[str, torch.Tensor]:
+        """Normalised per-env arm-controller DR values for privileged obs.
+        Returns empty dict before the first randomization call."""
+        if not hasattr(self, "_arm_stiffness"):
+            return {}
+        cfg = self.domain_randomization_config
+        stiff_lo, stiff_hi = cfg.arm_stiffness_range
+        damp_lo,  damp_hi  = cfg.arm_damping_range
+        d_lo,     d_hi     = cfg.action_delay_steps_range
+        a_lo,     a_hi     = cfg.lag_alpha_range
+        sr = stiff_hi - stiff_lo if stiff_hi != stiff_lo else 1.0
+        dr = damp_hi  - damp_lo  if damp_hi  != damp_lo  else 1.0
+        delay_r = float(d_hi - d_lo) if d_hi != d_lo else 1.0
+        ar = a_hi - a_lo if a_hi != a_lo else 1.0
+        return {
+            "arm_stiffness":     (self._arm_stiffness - stiff_lo) / sr,
+            "arm_damping":       (self._arm_damping  - damp_lo)  / dr,
+            "arm_action_delay":  (self._arm_action_delay.float() - d_lo) / delay_r,
+            "arm_lag_alpha":     (self._arm_lag_alpha - a_lo)    / ar,
+        }
+
+    # ── Camera latency (observation delay) DR ───────────────────────────────
+    # Mirrors the actuator-side PDJointPosDelayLagController: each env carries
+    # its own integer obs_delay_steps; rendered RGB frames are pushed into a
+    # per-sensor circular buffer and the policy reads the slot that's
+    # delay_steps behind the head. Centred on the 2026-05-15 camera-latency
+    # measurement (~49 ms at 30 Hz).
+
+    def _randomize_camera_latency(self, env_idx: torch.Tensor):
+        """Sample per-env obs_delay_steps. Always called at episode init so
+        downstream code can read self._obs_delay_per_env uniformly even when
+        DR is off (then it holds the centre)."""
+        cfg = self.domain_randomization_config
+        d_lo, d_hi = cfg.obs_delay_steps_range
+        max_d = int(cfg.max_obs_delay_steps)
+        if not hasattr(self, "_obs_delay_per_env"):
+            default = int(round((d_lo + d_hi) / 2))
+            self._obs_delay_per_env = torch.full(
+                (self.num_envs,), default,
+                dtype=torch.long, device=self.device).clamp(0, max_d)
+        if not self.domain_randomization or d_lo == d_hi:
+            return
+        # Uniform integer sample over [d_lo, d_hi] inclusive.
+        delays_f = self._batched_episode_rng[env_idx].uniform(
+            float(d_lo), float(d_hi) + 1.0 - 1e-6)
+        delays = np.clip(np.floor(delays_f).astype(np.int64), d_lo, d_hi)
+        self._obs_delay_per_env[env_idx.to(self.device)] = torch.as_tensor(
+            delays, dtype=torch.long, device=self.device)
+
+    def _apply_obs_delay(self, sensor_name: str, rgb: torch.Tensor) -> torch.Tensor:
+        """Push the current frame into a per-sensor circular buffer and
+        return the slot that's obs_delay_per_env behind the head.
+        rgb shape: (num_envs, H, W, 3) uint8."""
+        if not hasattr(self, "_obs_delay_per_env"):
+            return rgb
+        cfg = self.domain_randomization_config
+        max_d = int(cfg.max_obs_delay_steps) + 1   # +1 for the head slot itself
+        if not hasattr(self, "_obs_delay_buffers"):
+            self._obs_delay_buffers = {}
+            self._obs_delay_heads   = {}
+        if sensor_name not in self._obs_delay_buffers:
+            # Lazy alloc with the current frame replicated across all slots
+            # so the first few reads don't return zeros.
+            self._obs_delay_buffers[sensor_name] = rgb.unsqueeze(0).expand(
+                max_d, *rgb.shape).clone()
+            self._obs_delay_heads[sensor_name] = 0
+
+        buf  = self._obs_delay_buffers[sensor_name]
+        head = self._obs_delay_heads[sensor_name]
+        buf[head] = rgb
+        read_pos = (head - self._obs_delay_per_env) % max_d
+        env_arange = torch.arange(rgb.shape[0], device=rgb.device)
+        delayed = buf[read_pos, env_arange]
+        self._obs_delay_heads[sensor_name] = (head + 1) % max_d
+        return delayed
+
+    # ── Image-pipeline DR ───────────────────────────────────────────────────
+    # Per-episode photometric perturbations applied to every rendered RGB
+    # frame. Brackets the sim/real gap from sensor noise, white balance,
+    # gamma, hue, and saturation drift. JPEG roundtrip is parameterised in
+    # the config but not yet wired in this method — it would need a CPU
+    # bounce per frame and is better added in an obs-wrapper.
+
+    @staticmethod
+    def _rgb_to_hsv(rgb: torch.Tensor) -> torch.Tensor:
+        """Batched RGB->HSV in [0,1]. rgb shape: (..., 3). Returns (..., 3)."""
+        r, g, b = rgb.unbind(-1)
+        max_c, max_idx = rgb.max(dim=-1)
+        min_c = rgb.min(dim=-1).values
+        delta = max_c - min_c
+        v = max_c
+        s = torch.where(max_c > 0, delta / (max_c + 1e-10), torch.zeros_like(max_c))
+        h_r = ((g - b) / (delta + 1e-10)) % 6.0
+        h_g = ((b - r) / (delta + 1e-10)) + 2.0
+        h_b = ((r - g) / (delta + 1e-10)) + 4.0
+        h = torch.where(max_idx == 0, h_r,
+            torch.where(max_idx == 1, h_g, h_b))
+        h = torch.where(delta == 0, torch.zeros_like(h), h) / 6.0   # [0,1]
+        return torch.stack([h, s, v], dim=-1)
+
+    @staticmethod
+    def _hsv_to_rgb(hsv: torch.Tensor) -> torch.Tensor:
+        """Batched HSV->RGB. hsv shape: (..., 3). Returns (..., 3) in [0,1]."""
+        h, s, v = hsv.unbind(-1)
+        i = (h * 6.0).floor()
+        f = h * 6.0 - i
+        p = v * (1.0 - s)
+        q = v * (1.0 - f * s)
+        t = v * (1.0 - (1.0 - f) * s)
+        i = i.long() % 6
+        r = torch.where(i == 0, v,
+            torch.where(i == 1, q,
+            torch.where(i == 2, p,
+            torch.where(i == 3, p,
+            torch.where(i == 4, t, v)))))
+        g = torch.where(i == 0, t,
+            torch.where(i == 1, v,
+            torch.where(i == 2, v,
+            torch.where(i == 3, q,
+            torch.where(i == 4, p, p)))))
+        b = torch.where(i == 0, p,
+            torch.where(i == 1, p,
+            torch.where(i == 2, t,
+            torch.where(i == 3, v,
+            torch.where(i == 4, v, q)))))
+        return torch.stack([r, g, b], dim=-1)
+
+    def _randomize_image_pipeline(self, env_idx: torch.Tensor):
+        """Sample per-env image-pipeline params at episode init."""
+        cfg = self.domain_randomization_config
+        sigma_lo, sigma_hi = cfg.image_noise_sigma_range
+        gain_lo,  gain_hi  = cfg.image_channel_gain_range
+        gamma_lo, gamma_hi = cfg.image_gamma_range
+        jq_lo,    jq_hi    = cfg.image_jpeg_quality_range
+        sat_lo,   sat_hi   = cfg.image_saturation_range
+        hue_half = float(cfg.image_hue_shift_deg)
+
+        if not hasattr(self, "_image_noise_sigma"):
+            self._image_noise_sigma   = torch.full(
+                (self.num_envs,), (sigma_lo + sigma_hi) / 2,
+                dtype=torch.float32, device=self.device)
+            self._image_channel_gain  = torch.full(
+                (self.num_envs, 3), (gain_lo + gain_hi) / 2,
+                dtype=torch.float32, device=self.device)
+            self._image_gamma         = torch.full(
+                (self.num_envs,), (gamma_lo + gamma_hi) / 2,
+                dtype=torch.float32, device=self.device)
+            self._image_hue_shift     = torch.zeros(
+                self.num_envs, dtype=torch.float32, device=self.device)
+            self._image_saturation    = torch.full(
+                (self.num_envs,), (sat_lo + sat_hi) / 2,
+                dtype=torch.float32, device=self.device)
+            self._image_jpeg_enabled  = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device)
+            self._image_jpeg_quality  = torch.full(
+                (self.num_envs,), (jq_lo + jq_hi) / 2,
+                dtype=torch.float32, device=self.device)
+
+        if not self.domain_randomization:
+            return
+
+        sig   = self._batched_episode_rng[env_idx].uniform(sigma_lo, sigma_hi)
+        gain  = self._batched_episode_rng[env_idx].uniform(gain_lo,  gain_hi, size=(len(env_idx), 3))
+        gam   = self._batched_episode_rng[env_idx].uniform(gamma_lo, gamma_hi)
+        hue   = self._batched_episode_rng[env_idx].uniform(-hue_half, hue_half)
+        sat   = self._batched_episode_rng[env_idx].uniform(sat_lo,   sat_hi)
+        jpeg_roll = self._batched_episode_rng[env_idx].rand()
+        jpeg_q    = self._batched_episode_rng[env_idx].uniform(jq_lo, jq_hi)
+        jpeg_on   = jpeg_roll < float(cfg.image_jpeg_probability)
+
+        idx_t = env_idx.to(self.device)
+        def _t(v, dtype=torch.float32):
+            return torch.as_tensor(v, dtype=dtype, device=self.device)
+        self._image_noise_sigma[idx_t]  = _t(sig)
+        self._image_channel_gain[idx_t] = _t(gain)
+        self._image_gamma[idx_t]        = _t(gam)
+        self._image_hue_shift[idx_t]    = _t(hue)
+        self._image_saturation[idx_t]   = _t(sat)
+        self._image_jpeg_enabled[idx_t] = _t(jpeg_on, dtype=torch.bool)
+        self._image_jpeg_quality[idx_t] = _t(jpeg_q)
+
+    def _apply_image_pipeline_dr(self, rgb: torch.Tensor) -> torch.Tensor:
+        """Apply per-env channel gain, gamma, hue shift, saturation scale,
+        and additive Gaussian noise to a (num_envs, H, W, 3) uint8 frame.
+        Returns the same shape and dtype.
+
+        JPEG quality randomization is intentionally NOT applied here: it
+        requires a CPU bounce that would dominate step time at large
+        batch sizes. The per-env _image_jpeg_enabled / _image_jpeg_quality
+        tensors are still populated so an obs-wrapper can apply JPEG
+        roundtripping at the train_squint.py level if desired."""
+        if not hasattr(self, "_image_noise_sigma") or not self.domain_randomization:
+            return rgb
+
+        # uint8 -> float32 in [0, 1]; broadcast shape (num_envs, 1, 1, *)
+        x = rgb.float() / 255.0
+
+        gain = self._image_channel_gain.view(-1, 1, 1, 3)
+        x = x * gain
+
+        gamma = self._image_gamma.view(-1, 1, 1, 1)
+        x = x.clamp(min=1e-6).pow(gamma)
+
+        x = x.clamp(0.0, 1.0)
+        hsv = self._rgb_to_hsv(x)
+        hue_shift = (self._image_hue_shift / 360.0).view(-1, 1, 1)   # ([0,1] fraction)
+        sat_scale = self._image_saturation.view(-1, 1, 1)
+        hsv = torch.stack([
+            (hsv[..., 0] + hue_shift) % 1.0,
+            (hsv[..., 1] * sat_scale).clamp(0.0, 1.0),
+            hsv[..., 2],
+        ], dim=-1)
+        x = self._hsv_to_rgb(hsv)
+
+        sigma = self._image_noise_sigma.view(-1, 1, 1, 1)
+        x = (x + torch.randn_like(x) * sigma).clamp(0.0, 1.0)
+
+        return (x * 255.0).round().to(torch.uint8)
+
+    def get_camera_dr_params(self) -> dict[str, torch.Tensor]:
+        """Normalised per-env camera DR values for privileged observations."""
+        if not hasattr(self, "_image_noise_sigma"):
+            return {}
+        cfg = self.domain_randomization_config
+        def _norm(t, lo, hi):
+            r = hi - lo if hi != lo else 1.0
+            return (t - lo) / r
+        return {
+            "obs_delay":      _norm(self._obs_delay_per_env.float(),
+                                    *cfg.obs_delay_steps_range),
+            "image_noise":    _norm(self._image_noise_sigma,
+                                    *cfg.image_noise_sigma_range),
+            "image_gain":     _norm(self._image_channel_gain,
+                                    *cfg.image_channel_gain_range),
+            "image_gamma":    _norm(self._image_gamma,
+                                    *cfg.image_gamma_range),
+            "image_hue":      self._image_hue_shift / max(
+                cfg.image_hue_shift_deg, 1e-6),   # [-1, 1]
+            "image_sat":      _norm(self._image_saturation,
+                                    *cfg.image_saturation_range),
+        }
+
+    # ── Discrete wrist-camera roll jitter (robustness curriculum) ──────────
+    # Sampled per episode from {0, 1, 2, 3} → roll offset {0, π/2, π, 3π/2}.
+    # Only consumed by WristCameraEnv._update_wrist_camera_pose when
+    # config.wrist_camera_roll_discrete is True. Sampled unconditionally so
+    # the tensor exists for the privileged-obs path.
+
+    def _randomize_wrist_camera_roll(self, env_idx: torch.Tensor):
+        cfg = self.domain_randomization_config
+        if not hasattr(self, "_wrist_camera_roll_quadrant"):
+            self._wrist_camera_roll_quadrant = torch.zeros(
+                self.num_envs, dtype=torch.long, device=self.device)
+        if not (self.domain_randomization and cfg.wrist_camera_roll_discrete):
+            return
+        quadrant = self._batched_episode_rng[env_idx].uniform(0.0, 4.0 - 1e-6)
+        quadrant = np.floor(quadrant).astype(np.int64)
+        self._wrist_camera_roll_quadrant[env_idx.to(self.device)] = torch.as_tensor(
+            quadrant, dtype=torch.long, device=self.device)
+
+    # ── Obs hook: apply latency + image-pipeline DR to every RGB sensor ─────
+    def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
+        sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
+        for name, data in sensor_obs.items():
+            if not isinstance(data, dict) or "rgb" not in data:
+                continue
+            rgb = data["rgb"]
+            # Order matters: delay BEFORE image DR so a stale frame still
+            # carries its own per-step noise (mirrors a real camera, where
+            # sensor noise is fresh each frame even when the frame is late).
+            rgb = self._apply_obs_delay(name, rgb)
+            rgb = self._apply_image_pipeline_dr(rgb)
+            data["rgb"] = rgb
+        return sensor_obs
 
     def render_all(self):
         """Renders all human render cameras and sensors together, excluding segmentation."""
@@ -407,6 +838,10 @@ class BaseRandomEnv(BaseEnv):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         """Base episode initialization. Subclasses should call super() first."""
         self._randomize_gripper_speed(env_idx)
+        self._randomize_arm_controller(env_idx)
+        self._randomize_camera_latency(env_idx)
+        self._randomize_image_pipeline(env_idx)
+        self._randomize_wrist_camera_roll(env_idx)
         self._randomize_lighting(env_idx)
 
 
@@ -583,6 +1018,14 @@ class WristCameraEnv(BaseRandomEnv):
         else:
             dx = dy = dz = torch.zeros(self.num_envs, device=self.device)
             d_roll = d_pitch = d_yaw = torch.zeros(self.num_envs, device=self.device)
+
+        # Optional discrete roll jitter over {0°, 90°, 180°, 270°} for a
+        # robustness-phase curriculum. Sampled once per episode, applied on
+        # top of the continuous per-step rotation noise.
+        if (self.domain_randomization
+                and config.wrist_camera_roll_discrete
+                and hasattr(self, "_wrist_camera_roll_quadrant")):
+            d_roll = d_roll + self._wrist_camera_roll_quadrant.float() * (np.pi / 2)
 
         # Final position and rotation
         px, py, pz = base_x + dx, base_y + dy, base_z + dz

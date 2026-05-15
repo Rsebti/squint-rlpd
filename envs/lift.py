@@ -399,12 +399,12 @@ class Lift(DefaultCameraEnv):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 3
 
 
-@register_env("SO101LiftCube-v1", max_episode_steps=50)
+@register_env("SO101LiftCube-v1", max_episode_steps=150)
 class LiftCube(Lift):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)
 
-@register_env("SO101LiftCan-v1", max_episode_steps=50)
+@register_env("SO101LiftCan-v1", max_episode_steps=150)
 class LiftCan(Lift):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="can", **kwargs)
