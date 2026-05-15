@@ -229,7 +229,7 @@ class SO101(BaseAgent):
         ),
         start=Keyframe(
             qpos=np.array(
-                [0, 0, 0, np.pi / 2, 0.0, 60 * np.pi / 180] # sligtly open gripper
+                [0, 0, 0, np.pi / 2, -np.pi / 2, 60 * np.pi / 180] # sligtly open gripper
             ),  # Cam up, fully open gripper
             pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
         ),
