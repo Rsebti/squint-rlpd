@@ -17,7 +17,7 @@ echo "==[1/4] miniforge + base tooling ============================"
 sudo apt-get update -qq
 sudo apt-get install -y -qq git wget tmux htop nvtop ffmpeg
 
-if ! command -v conda &>/dev/null; then
+if [ ! -d "$HOME/miniforge3" ]; then
   # NB: not /tmp — many cloud VM images mount /tmp noexec, which breaks
   # the miniforge self-extractor.
   INSTALLER="$HOME/miniforge.sh"
