@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--video", default="/tmp/sim_eval.mp4", help="path to write the third-person mp4 (set empty to skip)")
     ap.add_argument("--render_size", type=int, default=512)
     ap.add_argument("--fps", type=int, default=10)
+    ap.add_argument("--spawn_box_size", type=float, default=0.20,
+                    help="full side length of the cube spawn box in metres (eval default: 0.20 = 20cm; training uses 0.25)")
     args = ap.parse_args()
 
     env_kwargs = dict(
@@ -58,6 +60,7 @@ def main():
         ),
         n_distractors=args.n_distractors,
         use_real_bowl=True,
+        spawn_box_half_size=args.spawn_box_size / 2,
     )
     env = gym.make(args.env_id, num_envs=1, **env_kwargs)
     env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=True)
