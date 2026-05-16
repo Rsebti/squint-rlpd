@@ -126,10 +126,10 @@ class RandomizationConfig:
     # Centred to bracket realistic mount slop / hand-held re-fit error on the
     # SO101 wrist mount. Widened 2026-05 to cover the larger sim-to-real
     # extrinsic mismatch we observed at deploy.
-    wrist_camera_pos_noise: Sequence[float] = (0.010, 0.010, 0.010)
-    """Max position noise (x, y, z) in metres, applied per control step relative to the gripper. ±10 mm covers re-clipping / mount flex."""
-    wrist_camera_rot_noise: Sequence[float] = (np.deg2rad(5), np.deg2rad(5), np.deg2rad(5))
-    """Max rotation noise (roll, pitch, yaw) in radians, applied per control step. ±5° covers mount-bolt rotational play."""
+    wrist_camera_pos_noise: Sequence[float] = (0.001, 0.001, 0.001)
+    """Max position noise (x, y, z) in metres, sampled ONCE per episode and held constant. ±1 mm — tight, training-friendly range."""
+    wrist_camera_rot_noise: Sequence[float] = (np.deg2rad(1), np.deg2rad(1), np.deg2rad(1))
+    """Max rotation noise (roll, pitch, yaw) in radians, sampled ONCE per episode and held constant. ±1° — tight, training-friendly range."""
     wrist_camera_fov_noise: float = np.deg2rad(3)
     """Per-episode FOV noise (radians) around the base 71°. ±3° spans common phone-cam / USB-cam intrinsic variation."""
     wrist_camera_roll_discrete: bool = False
@@ -805,6 +805,24 @@ class BaseRandomEnv(BaseEnv):
         self._wrist_camera_roll_quadrant[env_idx.to(self.device)] = torch.as_tensor(
             quadrant, dtype=torch.long, device=self.device)
 
+    # ── Per-episode wrist-camera pos/rot offsets ───────────────────────────
+    # Held constant across the episode (was per-step → ~30 Hz shake). Models
+    # a static mount-offset / re-clipping error per deploy, not vibration.
+    def _randomize_wrist_camera_offsets(self, env_idx: torch.Tensor):
+        cfg = self.domain_randomization_config
+        if not hasattr(self, "_wrist_camera_dr_offsets"):
+            self._wrist_camera_dr_offsets = torch.zeros(
+                self.num_envs, 6, dtype=torch.float32, device=self.device)
+        if not self.domain_randomization:
+            return
+        pos_n = cfg.wrist_camera_pos_noise
+        rot_n = cfg.wrist_camera_rot_noise
+        rand = 2.0 * torch.rand(len(env_idx), 6, device=self.device) - 1.0
+        scales = torch.tensor(
+            [pos_n[0], pos_n[1], pos_n[2], rot_n[0], rot_n[1], rot_n[2]],
+            dtype=torch.float32, device=self.device)
+        self._wrist_camera_dr_offsets[env_idx.to(self.device)] = rand * scales
+
     # ── Obs hook: apply latency + image-pipeline DR to every RGB sensor ─────
     def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
         sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
@@ -848,6 +866,7 @@ class BaseRandomEnv(BaseEnv):
         self._randomize_camera_latency(env_idx)
         self._randomize_image_pipeline(env_idx)
         self._randomize_wrist_camera_roll(env_idx)
+        self._randomize_wrist_camera_offsets(env_idx)
         self._randomize_lighting(env_idx)
 
 
@@ -1004,19 +1023,17 @@ class WristCameraEnv(BaseRandomEnv):
         base_x, base_y, base_z = self.WRIST_CAMERA_BASE_POS
         base_roll, base_pitch, base_yaw = self.WRIST_CAMERA_BASE_ROT_RAD
 
-        if self.domain_randomization:
-            # Batch all random numbers into one call (6 values per env)
-            rand_vals = 2 * torch.rand(self.num_envs, 6, device=self.device) - 1
-
-            pos_offset = config.wrist_camera_pos_noise
-            rot_noise = config.wrist_camera_rot_noise
-
-            dx = pos_offset[0] * rand_vals[:, 0]
-            dy = pos_offset[1] * rand_vals[:, 1]
-            dz = pos_offset[2] * rand_vals[:, 2]
-            d_roll = rot_noise[0] * rand_vals[:, 3]
-            d_pitch = rot_noise[1] * rand_vals[:, 4]
-            d_yaw = rot_noise[2] * rand_vals[:, 5]
+        if self.domain_randomization and hasattr(self, "_wrist_camera_dr_offsets"):
+            # Per-episode offsets (sampled at reset, held constant for the
+            # episode) — replaces the previous per-step resampling that
+            # produced visible ~30 Hz camera shake.
+            offsets = self._wrist_camera_dr_offsets
+            dx = offsets[:, 0]
+            dy = offsets[:, 1]
+            dz = offsets[:, 2]
+            d_roll = offsets[:, 3]
+            d_pitch = offsets[:, 4]
+            d_yaw = offsets[:, 5]
         else:
             dx = dy = dz = torch.zeros(self.num_envs, device=self.device)
             d_roll = d_pitch = d_yaw = torch.zeros(self.num_envs, device=self.device)
