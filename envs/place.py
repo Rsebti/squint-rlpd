@@ -248,7 +248,7 @@ class Place(DefaultCameraEnv):
         domain_randomization=False,
         spawn_box_pos=[0.25, 0],
         spawn_box_half_size=0.10,
-        action_smooth_coef: float = 0.67,
+        action_smooth_coef: float = 0.0,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to

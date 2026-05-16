@@ -109,8 +109,8 @@ class Args:
     """frequency to save training videos in terms of iterations"""
     control_mode: Optional[str] = None
     """the control mode to use for the environment"""
-    action_smooth_coef: float = 0.335
-    """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Sized for 30 Hz control (was 2.0 at 10 Hz; coef / freq preserves per-second jitter cost). Set 0 to disable."""
+    action_smooth_coef: float = 0.0
+    """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Disabled by default — the penalty creates a 'do nothing' attractor for from-scratch training. Enable (e.g. 0.05-0.2) only for fine-tuning a working policy if eval shows jitter."""
     obs_mode: Optional[str] = "rgb"
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"
