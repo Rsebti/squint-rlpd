@@ -1,3 +1,0 @@
-success_at_end: 0.00, success_once: 0.00, return: 1.90
-success_at_end: 0.00, success_once: 0.00, return: 3.59
-success_at_end: 0.00, success_once: 0.00, return: 4.14
