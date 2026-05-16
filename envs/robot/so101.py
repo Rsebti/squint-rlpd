@@ -31,7 +31,7 @@ from pathlib import Path
 #   lag_alpha   = dt_ctrl / (dt_ctrl + tau) = 33.3 / 88.3 = 0.378
 # Domain-randomize around these once the controller-level DR plumbing is in.
 ACTION_DELAY_STEPS_DEFAULT = 2
-LAG_ALPHA_DEFAULT = 0.378
+LAG_ALPHA_DEFAULT = 1.0  # 1.0 disables first-order lag (commanded target arrives instantly)
 
 
 class PDJointPosDelayLagController(PDJointPosController):
