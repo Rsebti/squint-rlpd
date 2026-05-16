@@ -264,7 +264,7 @@ class SO101(BaseAgent):
             upper=None,
             stiffness=1e3,
             damping=1e2,
-            force_limit=3.0,
+            force_limit=5.0,
             normalize_action=False,
         )
 
@@ -279,7 +279,7 @@ class SO101(BaseAgent):
             [ 0.0333,  0.0333,  0.0333,  0.0333,  0.0333,  0.0667],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
-            force_limit=3.0,
+            force_limit=5.0,
             use_delta=True,
             use_target=False,
         )
@@ -293,7 +293,7 @@ class SO101(BaseAgent):
             lower=[-1.0, -1.0, -1.0, -1.0, -1.0, -5.0],
             upper=[1.0, 1.0, 1.0, 1.0, 1.0, 5.0],
             damping=[1e2] * 6,
-            force_limit=3.0,
+            force_limit=5.0,
             friction=0,
             normalize_action=True
         )

@@ -172,9 +172,9 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     bin_half_size_z_range: Sequence[float] = (0.024 / 2, 0.036 / 2)
 
     # Friction for the cubes (painted wood — can be quite slippery).
-    item_friction_range: Sequence[float] = (0.2, 0.6)
+    item_friction_range: Sequence[float] = (0.5, 1.0)
     # Restitution for the cubes (mostly inelastic; small bounce tolerated).
-    item_restitution_range: Sequence[float] = (0.0, 0.2)
+    item_restitution_range: Sequence[float] = (0.0, 0.05)
     # Mass range in kg. Sampled directly per env; the per-env density passed
     # to SAPIEN is then mass / volume, so the mass is hard-bounded regardless
     # of cube_half_size_range. Real measured cube weight ≈ 4.5 g, so the
