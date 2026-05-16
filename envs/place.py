@@ -173,8 +173,8 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
 
     # Friction for the cubes (painted wood — can be quite slippery).
     item_friction_range: Sequence[float] = (0.5, 1.0)
-    # Restitution for the cubes (mostly inelastic; small bounce tolerated).
-    item_restitution_range: Sequence[float] = (0.0, 0.05)
+    # Restitution for the cubes — disabled (fully inelastic, no bounce).
+    item_restitution_range: Sequence[float] = (0.0, 0.0)
     # Mass range in kg. Sampled directly per env; the per-env density passed
     # to SAPIEN is then mass / volume, so the mass is hard-bounded regardless
     # of cube_half_size_range. Real measured cube weight ≈ 4.5 g, so the
@@ -182,7 +182,7 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     item_mass_range: Sequence[float] = (0.003, 0.006)
     # Friction + restitution for the bowl (was hardcoded 0.5 / 0.0).
     bowl_friction_range: Sequence[float] = (0.3, 1.0)
-    bowl_restitution_range: Sequence[float] = (0.0, 0.2)
+    bowl_restitution_range: Sequence[float] = (0.0, 0.0)  # disabled (fully inelastic)
     # Friction for the table top. Fixed at 0.5 (no randomization) so contacts
     # average a clean 0.5 against cubes and the bowl.
     table_friction_range: Sequence[float] = (0.3, 0.5)
