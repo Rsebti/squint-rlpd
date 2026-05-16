@@ -202,7 +202,7 @@ class SO101(BaseAgent):
     )
     urdf_config = dict(
         _materials=dict(
-            gripper=dict(static_friction=2.0, dynamic_friction=2.0, restitution=0.0)  
+            gripper=dict(static_friction=2.5, dynamic_friction=2.0, restitution=0.0)
         ),
         link=dict(
             gripper_link=dict(

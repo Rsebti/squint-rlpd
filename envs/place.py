@@ -171,8 +171,14 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     bin_half_size_y_range: Sequence[float] = (0.09 / 2, 0.11 / 2)
     bin_half_size_z_range: Sequence[float] = (0.024 / 2, 0.036 / 2)
 
-    # Friction for the cubes (painted wood — can be quite slippery).
-    item_friction_range: Sequence[float] = (0.5, 1.0)
+    # Split static / dynamic friction for the cubes. Real wood has a higher
+    # static coefficient than dynamic, so resist slipping initially then
+    # slide once moving. Bug-fix: the previous single `item_friction_range`
+    # used the same value for both, missing this asymmetry — the cube was
+    # slipping out of the fingers because dynamic == static was too low for
+    # a stable grasp.
+    item_static_friction_range:  Sequence[float] = (1.2, 2.0)
+    item_dynamic_friction_range: Sequence[float] = (0.5, 1.0)
     # Restitution for the cubes — disabled (fully inelastic, no bounce).
     item_restitution_range: Sequence[float] = (0.0, 0.0)
     # Mass range in kg. Sampled directly per env; the per-env density passed
@@ -365,7 +371,8 @@ class Place(DefaultCameraEnv):
         # in _initialize_episode based on the sampled goal_color_idx.
         colors = np.tile(COLOR_PALETTE[0], (self.num_envs, 1))  # default red
         cfg = self.domain_randomization_config
-        frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
+        static_frictions  = np.ones(self.num_envs) * (cfg.item_static_friction_range[0]  + cfg.item_static_friction_range[1])  / 2
+        dynamic_frictions = np.ones(self.num_envs) * (cfg.item_dynamic_friction_range[0] + cfg.item_dynamic_friction_range[1]) / 2
         restitutions = np.ones(self.num_envs) * (cfg.item_restitution_range[0] + cfg.item_restitution_range[1]) / 2
         mass_mid = (cfg.item_mass_range[0] + cfg.item_mass_range[1]) / 2
         masses = np.ones(self.num_envs) * mass_mid
@@ -386,9 +393,13 @@ class Place(DefaultCameraEnv):
                 )
                 # Cube color is now goal-conditioned: sampled from COLOR_PALETTE
                 # in _initialize_episode and applied as a material mutation.
-                frictions = self._batched_episode_rng.uniform(
-                    low=cfg.item_friction_range[0],
-                    high=cfg.item_friction_range[1],
+                static_frictions = self._batched_episode_rng.uniform(
+                    low=cfg.item_static_friction_range[0],
+                    high=cfg.item_static_friction_range[1],
+                )
+                dynamic_frictions = self._batched_episode_rng.uniform(
+                    low=cfg.item_dynamic_friction_range[0],
+                    high=cfg.item_dynamic_friction_range[1],
                 )
                 restitutions = self._batched_episode_rng.uniform(
                     low=cfg.item_restitution_range[0],
@@ -434,9 +445,13 @@ class Place(DefaultCameraEnv):
                 )
                 if cfg.randomize_item_color:
                     colors = self._batched_episode_rng.uniform(low=0, high=1, size=(3,))
-                frictions = self._batched_episode_rng.uniform(
-                    low=cfg.item_friction_range[0],
-                    high=cfg.item_friction_range[1],
+                static_frictions = self._batched_episode_rng.uniform(
+                    low=cfg.item_static_friction_range[0],
+                    high=cfg.item_static_friction_range[1],
+                )
+                dynamic_frictions = self._batched_episode_rng.uniform(
+                    low=cfg.item_dynamic_friction_range[0],
+                    high=cfg.item_dynamic_friction_range[1],
                 )
                 restitutions = self._batched_episode_rng.uniform(
                     low=cfg.item_restitution_range[0],
@@ -454,7 +469,8 @@ class Place(DefaultCameraEnv):
             self.item_dimensions = torch.stack([self.item_half_radii, self.item_half_radii, self.item_half_heights], dim=-1)
 
         colors = np.concatenate([colors, np.ones((self.num_envs, 1))], axis=-1)
-        self.item_frictions = common.to_tensor(frictions, device=self.device)
+        self.item_static_frictions  = common.to_tensor(static_frictions,  device=self.device)
+        self.item_dynamic_frictions = common.to_tensor(dynamic_frictions, device=self.device)
         self.item_restitutions = common.to_tensor(restitutions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
         self.item_masses = common.to_tensor(masses, device=self.device)
@@ -463,10 +479,9 @@ class Place(DefaultCameraEnv):
         items = []
         for i in range(self.num_envs):
             builder = self.scene.create_actor_builder()
-            friction = frictions[i]
             material = sapien.pysapien.physx.PhysxMaterial(
-                static_friction=friction,
-                dynamic_friction=friction,
+                static_friction=float(static_frictions[i]),
+                dynamic_friction=float(dynamic_frictions[i]),
                 restitution=float(restitutions[i]),
             )
 
@@ -671,9 +686,10 @@ class Place(DefaultCameraEnv):
                 per_env_actors = []
                 for i in range(self.num_envs):
                     builder = self.scene.create_actor_builder()
-                    friction = frictions[i]
                     material = sapien.pysapien.physx.PhysxMaterial(
-                        static_friction=friction, dynamic_friction=friction, restitution=0
+                        static_friction=float(static_frictions[i]),
+                        dynamic_friction=float(dynamic_frictions[i]),
+                        restitution=0,
                     )
                     builder.add_box_collision(
                         half_size=[half_sizes[i]] * 3, material=material, density=densities[i]
