@@ -268,15 +268,15 @@ class SO101(BaseAgent):
             normalize_action=False,
         )
 
-        # Delta caps at ±0.0873 rad/step on every joint (30 Hz = 150 deg/s,
-        # matches real STS3215 no-load speed). Gripper shares the same cap
-        # so closure isn't artificially slower than arm motion (closing in
-        # ~0.3 s instead of the previous ~1 s prevents the gripper from
-        # sweeping through the cube during the grasp transient).
+        # Delta caps at ±0.0333 rad/step on every joint (30 Hz = ~57 deg/s).
+        # Ablation: uniform across joints since all 6 actuators are STS3215.
+        # Reverted from 0.0873 to test whether the cap bump (rather than
+        # other DR/controller tweaks) was what unlocked the first grasps in
+        # eval1_run8.
         pd_joint_delta_pos = PDJointPosDelayLagControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.0873] * 6,
-            [ 0.0873] * 6,
+            [-0.0333] * 6,
+            [ 0.0333] * 6,
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
             force_limit=3.0,
