@@ -55,23 +55,33 @@ class RandomizationConfig:
     of samples within ±10°, tails extending further for robustness."""
 
     # === Common randomization settings (affected by domain_randomization flag) ===
-    gripper_stiffness_range: Sequence[float] = (500, 2000)
-    """Range for gripper joint stiffness randomization (per-episode)."""
-    gripper_damping_range: Sequence[float] = (50, 200)
-    """Range for gripper joint damping randomization (per-episode)."""
+    gripper_stiffness_range: Sequence[float] = (1200, 1800)
+    """Per-episode gripper-joint stiffness DR. Centre 1500, ±20% spread.
+    Narrower than the previous (500, 2000) — 500 was too soft to maintain
+    grasp under cube-reaction force, 2000 drove the PD into deep saturation
+    at every contact (cube-squirt failure mode)."""
+    gripper_damping_range: Sequence[float] = (120, 180)
+    """Per-episode gripper-joint damping DR. Centre 150, ±20% spread."""
 
     # === Arm-controller DR (matches real Feetech servo characteristics) ===
     # Centred on the 2026-05-15 step-response calibration (delay 60 ms /
     # tau 55 ms @ 30 Hz control -> delay_steps=2, lag_alpha=0.378). Ranges
     # bracket realistic per-arm / per-load variation.
-    arm_stiffness_range: Sequence[float] = (700.0, 1300.0)
-    """Range for arm joint stiffness randomization (per-episode). Centre 1e3."""
-    arm_damping_range: Sequence[float] = (70.0, 130.0)
-    """Range for arm joint damping randomization (per-episode). Centre 1e2."""
-    action_delay_steps_range: Sequence[int] = (1, 3)
-    """Inclusive integer range for per-env actuator delay (in control steps). Must lie within [0, max_delay_steps-1] of the controller config (default max 5)."""
-    lag_alpha_range: Sequence[float] = (0.30, 0.45)
-    """Range for per-env first-order-lag EMA mix. Centre 0.378."""
+    arm_stiffness_range: Sequence[float] = (900.0, 1300.0)
+    """Per-episode arm-joint stiffness DR. Centre 1100, ±18% spread."""
+    arm_damping_range: Sequence[float] = (80.0, 120.0)
+    """Per-episode arm-joint damping DR. Centre 100, ±20% spread."""
+    action_delay_steps_range: Sequence[int] = (2, 2)
+    """Inclusive integer range for per-env actuator delay (control steps).
+    Pinned to 2 (= 66.7 ms at 30 Hz) — closest discrete approximation of
+    the measured 60 ms STS3215 dead time, well under the 70 ms hard cap.
+    No delay-DR variation; the 30 Hz step granularity (33 ms) is too coarse
+    to express the ~20 ms DR window without exceeding the cap."""
+    lag_alpha_range: Sequence[float] = (1.0, 1.0)
+    """Per-episode first-order-lag EMA mix. 1.0 = no lag (commanded target
+    arrives instantly through the EMA filter). Kept off so the only response
+    delay is the discrete action_delay_steps above — total delay stays
+    bounded by the hard constraint without needing to mix lag in."""
     robot_color: Optional[Union[str, Sequence[float]]] = (0.03, 0.03, 0.03)
     """Robot color in RGB (0-1). Near-black (~6% albedo) — visibly black but
     with enough diffuse response that Lambertian shading + specular sheen

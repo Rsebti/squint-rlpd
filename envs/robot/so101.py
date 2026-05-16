@@ -268,15 +268,15 @@ class SO101(BaseAgent):
             normalize_action=False,
         )
 
-        # Arm joint delta caps at ±0.0333 rad/step (30 Hz = ~57 deg/s,
-        # same wrist speed cap as the previous 10 Hz config). Gripper
-        # delta cap ±0.0667 so grasping still closes/opens quickly.
-        # Uses the delay+lag controller so the sim plant approximates the
-        # Feetech STS3215's serial-bus latency + on-board PID response.
+        # Delta caps at ±0.0873 rad/step on every joint (30 Hz = 150 deg/s,
+        # matches real STS3215 no-load speed). Gripper shares the same cap
+        # so closure isn't artificially slower than arm motion (closing in
+        # ~0.3 s instead of the previous ~1 s prevents the gripper from
+        # sweeping through the cube during the grasp transient).
         pd_joint_delta_pos = PDJointPosDelayLagControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.0333, -0.0333, -0.0333, -0.0333, -0.0333, -0.0667],
-            [ 0.0333,  0.0333,  0.0333,  0.0333,  0.0333,  0.0667],
+            [-0.0873] * 6,
+            [ 0.0873] * 6,
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
             force_limit=3.0,

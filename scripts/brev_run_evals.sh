@@ -24,7 +24,8 @@ cd "${REPO_DIR:-$HOME/squint}"
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
 EP_STEPS="${EP_STEPS:-100}"                      # 3.3 s @ 30 Hz. Matches local training; bump to 150 for longer cycles.
-NUM_ENVS="${NUM_ENVS:-2048}"
+NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
+NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-32}"   # halves eval-metric noise vs the trainer's default 16
 # WANDB_ENTITY is optional — leave empty to let wandb pick the default entity
 # associated with the API key (your personal user). Set explicitly only if you
 # want runs under a team/workspace and that workspace exists on wandb.ai.
@@ -62,6 +63,7 @@ run_stage() {
     --total_timesteps="$TOTAL_TIMESTEPS" \
     --eval_max_episode_steps="$EP_STEPS" \
     --num_envs="$NUM_ENVS" \
+    --num_eval_envs="$NUM_EVAL_ENVS" \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --save_model \

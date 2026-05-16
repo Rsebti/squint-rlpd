@@ -45,9 +45,10 @@ SIM_CAM_SIZE = 128       # sim wrist-camera resolution (intermediate resize)
 N_COLORS = 6             # goal-color one-hot length
 CONTROL_HZ = 30          # sim sim_freq=300 / control_freq=30 (matches training)
 
-# Per-joint delta caps (rad/step): arm joints ±0.0333, gripper ±0.0667 (30 Hz).
-# Same per-second velocity cap as the previous 10 Hz / ±0.1 setting.
-DELTA_CAP = np.array([0.0333, 0.0333, 0.0333, 0.0333, 0.0333, 0.0667], dtype=np.float32)
+# Per-joint delta caps (rad/step): ±0.0873 rad/step on every joint
+# (30 Hz × 0.0873 = 2.618 rad/s = 150 deg/s), matching the real STS3215
+# no-load speed and the sim's pd_joint_delta_pos config.
+DELTA_CAP = np.array([0.0873] * 6, dtype=np.float32)
 # Joint limits from so101.urdf, order: pan, lift, elbow, wrist_flex, wrist_roll, gripper.
 JOINT_LOWER = np.array([-1.91986, -1.74533, -1.69, -1.65806, -2.74385, -0.174533])
 JOINT_UPPER = np.array([1.91986, 1.74533, 1.69, 1.65806, 2.84121, 2.0944])
