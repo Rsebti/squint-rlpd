@@ -2,7 +2,7 @@
 
 3-stage training chain (eval1 → eval2, eval3 warm-started from eval1) running
 unattended on a single L40S 48 GB VM. Each stage: 20 M steps @ 2048 envs,
-episode length 150 (5 s at 30 Hz). Total wall-time ~5–9 h, cost ~$5–10.
+episode length 100 (3.3 s at 30 Hz). Total wall-time ~5–9 h, cost ~$5–10.
 
 ## One-time setup (on your laptop)
 You need a wandb account and your API key from <https://wandb.ai/authorize>.
@@ -36,7 +36,7 @@ All overridable via env vars before `bash run_all.sh`:
 |---|---|---|
 | `ENV_ID` | `SO101PlaceCube-v1` | swap to `SO101LiftCube-v1`, etc. |
 | `TOTAL_TIMESTEPS` | `20000000` | per stage |
-| `EP_STEPS` | `150` | 5 s @ 30 Hz (100 = 3.3 s, too short for pick+place) |
+| `EP_STEPS` | `100` | 3.3 s @ 30 Hz, matches local training. Bump to 150 for longer cycles. |
 | `NUM_ENVS` | `2048` | drop to 1024 if you hit PhysX broad-phase OOM |
 | `WANDB_PROJECT` | `maniskill-so101` | |
 

@@ -23,7 +23,7 @@ cd "${REPO_DIR:-$HOME/squint}"
 # ── Knobs (edit here, not on the command line) ────────────────────────────────
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
-EP_STEPS="${EP_STEPS:-150}"                      # 5 s @ 30 Hz. 100 = 3.3 s is too short for pick+place
+EP_STEPS="${EP_STEPS:-100}"                      # 3.3 s @ 30 Hz. Matches local training; bump to 150 for longer cycles.
 NUM_ENVS="${NUM_ENVS:-2048}"
 # WANDB_ENTITY is optional — leave empty to let wandb pick the default entity
 # associated with the API key (your personal user). Set explicitly only if you
