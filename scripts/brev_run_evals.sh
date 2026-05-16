@@ -26,6 +26,12 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
 EP_STEPS="${EP_STEPS:-100}"                      # 3.3 s @ 30 Hz. Matches local training; bump to 150 for longer cycles.
 NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-32}"   # halves eval-metric noise vs the trainer's default 16
+
+# Unique group tag for this launch — all 3 stages share it, so they appear
+# together in wandb under a single, timestamped group (eval1/eval2/eval3 still
+# get distinct run IDs + names). Override via WANDB_GROUP if you want a fixed
+# label across re-launches.
+WANDB_GROUP="${WANDB_GROUP:-SQUINT-$(date +%Y%m%d-%H%M)}"
 # WANDB_ENTITY is optional — leave empty to let wandb pick the default entity
 # associated with the API key (your personal user). Set explicitly only if you
 # want runs under a team/workspace and that workspace exists on wandb.ai.
@@ -66,6 +72,7 @@ run_stage() {
     --num_eval_envs="$NUM_EVAL_ENVS" \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
+    --wandb_group="$WANDB_GROUP" \
     --save_model \
     "${extra[@]}"
 }
