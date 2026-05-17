@@ -888,21 +888,11 @@ class Place(DefaultCameraEnv):
                 [self.spawn_box_pos[0], self.spawn_box_pos[1], 0]
             )
 
-            # Use placement sampler for non-overlapping positions
-            region = [
-                [-self.spawn_box_half_size, -self.spawn_box_half_size],
-                [self.spawn_box_half_size, self.spawn_box_half_size]
-            ]
-            sampler = randomization.UniformPlacementSampler(
-                bounds=region, batch_size=b, device=self.device
-            )
-
-            # Item/bin radius (use max for conservative placement).
+            # Item/bin radii (worst-case to be conservative).
             # When distractors are face-to-face on the target, the cluster
             # extends from the target center by (half_size + 2*half_size) =
-            # 3*half_size into any occupied direction. Use that as the effective
-            # radius so the bin sampler avoids the whole cluster, not just the
-            # target cube.
+            # 3*half_size into any occupied direction. Use that as the
+            # effective item radius so the bin avoids the whole cluster.
             if self.item_type == "can":
                 item_radius = self.item_half_radii.max().item() + 0.01
             else:
@@ -911,8 +901,58 @@ class Place(DefaultCameraEnv):
                 item_radius = cluster_mult * hs + 0.01
             bin_radius = self.bin_radius.max().item() + 0.01
 
-            item_xy_offset = sampler.sample(item_radius, 100)
-            bin_xy_offset = sampler.sample(bin_radius, 100, verbose=False)
+            # Cube spawn region (unchanged): the original spawn_box.
+            cube_region = [
+                [-self.spawn_box_half_size, -self.spawn_box_half_size],
+                [self.spawn_box_half_size, self.spawn_box_half_size]
+            ]
+            cube_sampler = randomization.UniformPlacementSampler(
+                bounds=cube_region, batch_size=b, device=self.device
+            )
+            item_xy_offset = cube_sampler.sample(item_radius, 100)
+
+            # Bowl spawn region: WIDER than the cube region on 3 sides — wider
+            # in y on both sides AND farther in +x. Keep the near-robot edge
+            # (−x, robot side) UNCHANGED so the bowl never gets closer to the
+            # robot than before. ±5 cm extra past the cube box on the 3 free
+            # sides gives the bowl more spatial variety without bringing it
+            # into a kinematically hard-to-reach pose.
+            BOWL_FAR_EXTRA   = 0.05   # +5 cm in +x (farther from robot)
+            BOWL_WIDTH_EXTRA = 0.05   # ±5 cm wider in y on both sides
+            bin_x_lo = -self.spawn_box_half_size                       # unchanged
+            bin_x_hi =  self.spawn_box_half_size + BOWL_FAR_EXTRA
+            bin_y_lo = -self.spawn_box_half_size - BOWL_WIDTH_EXTRA
+            bin_y_hi =  self.spawn_box_half_size + BOWL_WIDTH_EXTRA
+            bin_xy_offset = torch.zeros((b, 2), device=self.device)
+            bin_xy_offset[:, 0] = torch.rand(b, device=self.device) * (bin_x_hi - bin_x_lo) + bin_x_lo
+            bin_xy_offset[:, 1] = torch.rand(b, device=self.device) * (bin_y_hi - bin_y_lo) + bin_y_lo
+
+            # Cube–bowl exclusion: cube center must be ≥ 10 cm from bowl
+            # center (bowl rim is at 7.5 cm, +2.5 cm safety). Rejection loop
+            # re-samples only the envs whose cube fell too close. After the
+            # loop any remaining bad envs are pushed radially outward.
+            BOWL_EXCLUSION = 0.10
+            for _ in range(20):
+                delta_xy = item_xy_offset - bin_xy_offset
+                dist = torch.linalg.norm(delta_xy, dim=-1)
+                bad = dist < BOWL_EXCLUSION
+                if not bad.any():
+                    break
+                new_offset = cube_sampler.sample(item_radius, 100)
+                item_xy_offset = torch.where(bad.unsqueeze(-1), new_offset, item_xy_offset)
+            # Hard fix for any holdouts: push radially away from bowl to the
+            # exclusion boundary (rare; shows up when the cube region is small
+            # and the bowl sits near the cube region's centre).
+            delta_xy = item_xy_offset - bin_xy_offset
+            dist = torch.linalg.norm(delta_xy, dim=-1, keepdim=True)
+            still_bad = (dist < BOWL_EXCLUSION).squeeze(-1)
+            if still_bad.any():
+                direction = torch.where(
+                    dist > 1e-6, delta_xy / dist.clamp(min=1e-6),
+                    torch.tensor([1.0, 0.0], device=self.device).expand_as(delta_xy),
+                )
+                pushed = bin_xy_offset + direction * BOWL_EXCLUSION
+                item_xy_offset = torch.where(still_bad.unsqueeze(-1), pushed, item_xy_offset)
 
             # Cluster of (1 + n_distractors) cubes glued face-to-face. The
             # sampled position is the geometric center of the cluster, so the

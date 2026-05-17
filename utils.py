@@ -9,6 +9,8 @@ import torch.nn.functional as F
 
 import torchvision
 
+from mani_skill.utils import common
+from mani_skill.utils.visualization.misc import images_to_video, tile_images, put_info_on_image
 from mani_skill.utils.wrappers.record import RecordEpisode
 
 # ---------------------------  Wrappers --------------------------------------#
@@ -146,19 +148,49 @@ class GoalColorOverlayWrapper(gym.Wrapper):
 class ClockedRecordEpisode(RecordEpisode):
     """RecordEpisode with a single wall/sim clock stamped on each video frame.
 
-    The overlay is added AFTER per-env tiling, so there is exactly one clock per
-    .mp4 frame (not one per env tile). Resets each time a video is flushed.
+    Also caps the per-frame env tiling at MAX_ENVS_IN_VIDEO so the .mp4 stays
+    readable as NUM_EVAL_ENVS grows past ~64. Beyond that the tile cells
+    become too small to interpret and the file grows linearly in env count.
+    The cap takes the first MAX_ENVS_IN_VIDEO envs (DR makes them visually
+    diverse anyway). Best/worst selection would need a per-env frame buffer.
+
+    The clock overlay is added AFTER per-env tiling, so there is exactly one
+    clock per .mp4 frame. Resets each time a video is flushed.
 
     Shows: wall-clock seconds since the video started, sim seconds (= step *
     control_timestep), and the ratio sim/wall. >1 means sim runs faster than
     real-time; <1 means slower.
     """
 
+    MAX_ENVS_IN_VIDEO = 30
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._control_dt = float(self.base_env.control_timestep)
         self._clock_wall_start = None
         self._clock_sim_steps = 0
+
+    def capture_image(self, infos=None):
+        # Override RecordEpisode.capture_image to cap the number of envs we
+        # tile into the video before composing the mosaic.
+        img = self.env.render()
+        img = common.to_numpy(img)
+        if len(img.shape) == 3:
+            img = img[None]
+        if len(img) > self.MAX_ENVS_IN_VIDEO:
+            img = img[: self.MAX_ENVS_IN_VIDEO]
+        if infos is not None:
+            for i in range(len(img)):
+                info_item = {
+                    k: v if np.size(v) == 1 else v[i] for k, v in infos.items()
+                }
+                img[i] = put_info_on_image(img[i], info_item)
+        if len(img.shape) > 3:
+            if len(img) == 1:
+                img = img[0]
+            else:
+                img = tile_images(img, nrows=self.video_nrows)
+        return self._stamp_clock(img)
 
     def _stamp_clock(self, img: np.ndarray) -> np.ndarray:
         if self._clock_wall_start is None:
@@ -180,10 +212,6 @@ class ClockedRecordEpisode(RecordEpisode):
         cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
                     (255, 255, 0), thickness, cv2.LINE_AA)
         return img
-
-    def capture_image(self, infos=None):
-        img = super().capture_image(infos)
-        return self._stamp_clock(img)
 
     def flush_video(self, *args, **kwargs):
         ret = super().flush_video(*args, **kwargs)
