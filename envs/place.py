@@ -268,11 +268,6 @@ class Place(DefaultCameraEnv):
         self.action_smooth_coef = float(action_smooth_coef)
         self._last_action = None
         self._just_reset_mask = None
-        # Per-env counter of steps the TCP has spent within REACH_CLOSE_DIST
-        # of the cube. Once it crosses REACH_HOLD_STEPS (10 = 1 s @ 10 Hz) the
-        # reach reward shuts off for that env, forcing the policy off the
-        # hover-over-cube plateau and onto the grasp signal.
-        self._reach_close_steps = None
         if not (0 <= n_distractors <= 4):
             # Distractors are placed face-to-face on the target's 4 cardinal
             # faces (one per face), so the geometry caps at 4.
@@ -879,8 +874,6 @@ class Place(DefaultCameraEnv):
             # magnitude of a_0 instead of a true rate ||a_t - a_{t-1}||).
             if self._just_reset_mask is not None:
                 self._just_reset_mask[env_idx] = True
-            if self._reach_close_steps is not None:
-                self._reach_close_steps[env_idx] = 0
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1069,37 +1062,15 @@ class Place(DefaultCameraEnv):
         item_lifted = self.item.pose.p[..., -1] >= (self.item_half_sizes + 1e-3)
 
         item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
-        is_item_static = item_vel <= 1e-2  # tightened from 2e-2 -> 1e-2 (1 cm/s)
-        # Grasp-only curriculum: bilateral fingertip force ≥ 0.5 N on cube
-        # (is_grasping's default min_force) AND cube barely moving (≤ 3 mm/s).
-        # Sustained over 30 steps (1 s @ 30 Hz) the per-step +0.1 bonus
-        # integrates to +3, matching the spec "hold for 1 s -> +3".
-        is_item_grasped = self.agent.is_grasping(self.item, min_force=0.5)
-        is_grasp_held = is_item_grasped & (item_vel <= 3e-3)
+        is_item_static = item_vel <= 2e-2
+        is_item_grasped = self.agent.is_grasping(self.item)
         is_robot_static = self.agent.is_static()
 
-        # Contact checks
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
         robot_touching_bin = self.agent.is_touching(self.bin)
         robot_touching_item = self.agent.is_touching(self.item)
-        # Cube-table contact: PhysX pairwise contact force, threshold 1e-2 N.
-        # Anything above ~0.01 N means a real contact pair exists (a cube
-        # sitting on the table has ~0.05 N of normal force from its 5 g weight,
-        # so 0.01 is well below resting contact and above numerical noise).
-        item_table_force = torch.linalg.norm(
-            self.scene.get_pairwise_contact_forces(self.item, self.table_scene.table), axis=-1)
-        item_touching_table = item_table_force >= 1e-2
 
-        # "Carried" = cube is OFF the table AND moving slowly with the gripper
-        # (i.e., truly being held, not sliding on the table surface). Used in
-        # the reward formula in place of the raw is_item_grasped signal so the
-        # policy only collects the +3 bonus when the cube has actually been
-        # lifted clear and stabilised, not just brushed by the fingers.
-        is_item_carried = (~item_touching_table) & is_item_static
-
-        # Grasp-only curriculum: success = bilateral grasp this step.
-        # success_once over an episode = "did it ever close on the cube".
-        success = is_item_grasped
+        success = is_item_above_bin & (~robot_touching_item) & is_robot_static & (~robot_touching_bin)
 
         return {
             "inside_x": inside_x,
@@ -1107,62 +1078,67 @@ class Place(DefaultCameraEnv):
             "item_vel": item_vel,
             "item_lifted": item_lifted,
             "is_item_static": is_item_static,
-
             "success": success,
             "is_item_above_bin": is_item_above_bin,
             "is_item_grasped": is_item_grasped,
-            "is_item_carried": is_item_carried,
-            "is_grasp_held": is_grasp_held,
             "is_robot_static": is_robot_static,
             "robot_touching_table": robot_touching_table,
             "robot_touching_bin": robot_touching_bin,
             "robot_touching_item": robot_touching_item,
-            "item_touching_table": item_touching_table,
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        # Grasp-only curriculum, two phases:
-        #   phase 1 (reach):  +up-to-2.0 dense reach reward
-        #     turns OFF for an env once its TCP has been within 2 cm of the
-        #     cube for 30 consecutive control steps (1 s @ 30 Hz). This
-        #     removes the hover-over-cube plateau that traps the policy.
-        #   phase 2 (grasp):  +2.0 when both fingers contact cube ≥ 0.5 N.
-        #     Strictly dominates any residual reach reward, so once reach
-        #     shuts off there is only one gradient to climb.
-        REACH_CLOSE_DIST = 0.02    # 2 cm
-        REACH_HOLD_STEPS = 10      # 1 s @ 10 Hz
-
+        # Baseline 4398ce9 reward (hard reset). Components:
+        #   reach: dense up to 2.0
+        #   grasped: replace reach with 3 + place_reward
+        #   above bin: 4 + place_reward + dropped + gripper_openness + static
+        #   success: 9
+        #   penalties: -3 bin contact, -1 cube not lifted
         tcp_to_item_dist = torch.linalg.norm(self.agent.tcp_pose.p - self.item.pose.p, axis=1)
-
-        # Lazy-init the per-env "steps spent close to cube" counter.
-        if self._reach_close_steps is None or self._reach_close_steps.shape[0] != tcp_to_item_dist.shape[0]:
-            self._reach_close_steps = torch.zeros_like(tcp_to_item_dist, dtype=torch.int32)
-        close_mask = tcp_to_item_dist < REACH_CLOSE_DIST
-        self._reach_close_steps = torch.where(
-            close_mask,
-            self._reach_close_steps + 1,
-            self._reach_close_steps,
-        )
-        reach_active = self._reach_close_steps < REACH_HOLD_STEPS
-
         reaching_reward = 2 * (1 - torch.tanh(5 * tcp_to_item_dist))
-        reaching_reward = torch.where(reach_active, reaching_reward, torch.zeros_like(reaching_reward))
-        grasp_reward = 2.0 * info["is_item_grasped"].float()
-        reward = reaching_reward + grasp_reward
+        reward = reaching_reward
 
-        # Action-rate penalty (CAPS-style): -coef * ||a_t - a_{t-1}||^2 per env.
-        # Suppresses high-frequency policy jitter that a stiff PhysX drive
-        # silently absorbs but a real Feetech servo cannot follow, producing
-        # oscillation at deployment. coef ~2.0 places it at ~15-20% of the
-        # dense reward for a jittery policy and ~0.3% once smooth.
+        item_pos = self.item.pose.p
+        bin_pos = self.bin.pose.p.clone()
+        goal_xyz = bin_pos.clone()
+        goal_xyz[..., 2] = self.bin_thickness + self.item_half_sizes + self.target_z_above_floor
+
+        item_to_goal_dist = torch.linalg.norm(goal_xyz - item_pos, axis=1)
+        place_reward_final = 1 - torch.tanh(5.0 * item_to_goal_dist)
+
+        item_to_goal_dist_xy = torch.linalg.norm(goal_xyz[..., :2] - item_pos[..., :2], dim=1)
+        item_to_goal_dist_z_far = torch.linalg.norm(
+            (goal_xyz[..., 2:] + (self.bin_dimensions[:, 2:] * 2) + 0.03) - item_pos[..., 2:], dim=1
+        )
+        item_to_goal_dist_z_close = torch.linalg.norm(goal_xyz[..., 2:] - item_pos[..., 2:], dim=1)
+        item_close_to_goal = (item_to_goal_dist_xy <= self.bin_radius)
+        item_to_goal_dist_z = torch.where(item_close_to_goal, item_to_goal_dist_z_close, item_to_goal_dist_z_far)
+        place_reward_z = 1 - torch.tanh(10.0 * item_to_goal_dist_z)
+        place_reward = place_reward_final + place_reward_z
+
+        gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
+        gripper_openness = (self.agent.robot.get_qpos()[:, -1] - gripper_min) / (gripper_max - gripper_min)
+
+        reward[info["is_item_grasped"]] = (3 + place_reward)[info["is_item_grasped"]]
+
+        is_item_dropped = (~info["robot_touching_item"]).float()
+        robot_v = torch.linalg.norm(self.agent.robot.get_qvel()[:, :-1], axis=1)
+        static_robot_reward = 1 - torch.tanh(robot_v * 10)
+        reward[info["is_item_above_bin"]] = (4 + place_reward + is_item_dropped + gripper_openness + static_robot_reward)[info["is_item_above_bin"]]
+
+        reward[info["success"]] = 9
+
+        reward -= 3 * info["robot_touching_bin"].float()
+        reward -= 1 * (~info["item_lifted"]).float()
+
+        # Action-rate penalty (CAPS-style). action_smooth_coef defaults to 0,
+        # so this branch is a no-op unless explicitly enabled.
         if self.action_smooth_coef > 0 and torch.is_tensor(action):
             if self._last_action is None or self._last_action.shape != action.shape:
                 self._last_action = torch.zeros_like(action)
                 self._just_reset_mask = torch.ones(
                     action.shape[0], dtype=torch.bool, device=action.device
                 )
-            # On freshly-reset envs, treat last_action as the current action
-            # so the first-step rate is zero (otherwise we'd penalize ||a_0||).
             fresh = self._just_reset_mask
             if fresh.any():
                 self._last_action[fresh] = action[fresh].detach()
@@ -1176,11 +1152,10 @@ class Place(DefaultCameraEnv):
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: dict
     ):
-        # Max per step ≈ reach 2.0 (only during phase 1) + grasp 2.0 = 4.0.
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 4.0
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 9
 
 
-@register_env("SO101PlaceCube-v1", max_episode_steps=300)
+@register_env("SO101PlaceCube-v1", max_episode_steps=75)
 class PlaceCube(Place):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)
