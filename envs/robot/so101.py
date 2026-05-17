@@ -264,7 +264,7 @@ class SO101(BaseAgent):
             upper=None,
             stiffness=1e3,
             damping=1e2,
-            force_limit=3,  # ablation: real STS3215 stall torque (~3 N·m) on ALL joints, including gripper
+            force_limit=100,  # uniform 100 N·m, matches baseline 4398ce9 (rigid arm under contact)
             normalize_action=False,
         )
 
@@ -276,7 +276,7 @@ class SO101(BaseAgent):
             [ 0.05,  0.05,  0.05,  0.05,  0.05,  0.2],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
-            force_limit=3,  # ablation: real STS3215 stall torque (~3 N·m) on ALL joints, including gripper
+            force_limit=100,  # uniform 100 N·m, matches baseline 4398ce9 (rigid arm under contact)
             use_delta=True,
             use_target=False,
         )
@@ -290,7 +290,7 @@ class SO101(BaseAgent):
             lower=[-1.0, -1.0, -1.0, -1.0, -1.0, -5.0],
             upper=[1.0, 1.0, 1.0, 1.0, 1.0, 5.0],
             damping=[1e2] * 6,
-            force_limit=3,  # ablation: real STS3215 stall torque (~3 N·m) on ALL joints, including gripper
+            force_limit=100,  # uniform 100 N·m, matches baseline 4398ce9 (rigid arm under contact)
             friction=0,
             normalize_action=True
         )

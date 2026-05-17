@@ -24,6 +24,7 @@ cd "${REPO_DIR:-$HOME/squint}"
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
 EP_STEPS="${EP_STEPS:-75}"                       # 7.5 s @ 10 Hz. Matches baseline timescale.
+IMAGE_SIZE="${IMAGE_SIZE:-16}"                   # CNN input H=W. 16 default; override to 32 for finer visual detail.
 NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-256}"  # 16× the trainer default. At p~0.05 SE drops from 0.039 (N=32) to ~0.014 (N=256). Tiled video is capped to first 30 envs in utils.ClockedRecordEpisode.
 BUFFER_SIZE="${BUFFER_SIZE:-3000000}"  # 3M transitions (~5 GB host RAM). Keeps more diverse experience; pure sample-efficiency win on A100 80GB / 117GB RAM.
@@ -75,6 +76,7 @@ run_stage() {
     --num_eval_envs="$NUM_EVAL_ENVS" \
     --buffer_size="$BUFFER_SIZE" \
     --num_updates="$NUM_UPDATES" \
+    --image_size="$IMAGE_SIZE" \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \
