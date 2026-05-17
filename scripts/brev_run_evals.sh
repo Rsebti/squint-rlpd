@@ -26,6 +26,8 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
 EP_STEPS="${EP_STEPS:-170}"                      # 5.67 s @ 30 Hz. Gives the policy enough real-time for full reach + grasp + lift + place at 0.6 s gripper closure.
 NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-32}"   # halves eval-metric noise vs the trainer's default 16
+BUFFER_SIZE="${BUFFER_SIZE:-3000000}"  # 3M transitions (~5 GB host RAM). Keeps more diverse experience; pure sample-efficiency win on A100 80GB / 117GB RAM.
+NUM_UPDATES="${NUM_UPDATES:-384}"      # SAC gradient steps per env step (default 256). Uses the GPU-util headroom from being kernel-launch bound.
 
 # Unique group tag for this launch — all 3 stages share it, so they appear
 # together in wandb under a single, timestamped group (eval1/eval2/eval3 still
@@ -71,6 +73,8 @@ run_stage() {
     --eval_max_episode_steps="$EP_STEPS" \
     --num_envs="$NUM_ENVS" \
     --num_eval_envs="$NUM_EVAL_ENVS" \
+    --buffer_size="$BUFFER_SIZE" \
+    --num_updates="$NUM_UPDATES" \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \
@@ -85,6 +89,7 @@ run_stage() {
 # Format: "seed n_distractors [ckpt_path]"
 declare -A STAGES=(
   [eval1]="1 0 "
+  [eval1_warm]="1 0 $EVAL1_CKPT"
   [eval2]="2 1 $EVAL1_CKPT"
   [eval3]="3 3 $EVAL1_CKPT"
 )
@@ -96,7 +101,7 @@ fi
 
 for stage in "${REQUESTED[@]}"; do
   if [ -z "${STAGES[$stage]:-}" ]; then
-    echo "Unknown stage '$stage'. Valid: eval1 eval2 eval3" >&2; exit 1
+    echo "Unknown stage '$stage'. Valid: eval1 eval1_warm eval2 eval3" >&2; exit 1
   fi
   # shellcheck disable=SC2086
   run_stage "$stage" ${STAGES[$stage]}
