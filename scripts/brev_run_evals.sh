@@ -23,7 +23,7 @@ cd "${REPO_DIR:-$HOME/squint}"
 # ── Knobs (edit here, not on the command line) ────────────────────────────────
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
-EP_STEPS="${EP_STEPS:-100}"                      # 3.3 s @ 30 Hz. Matches local training; bump to 150 for longer cycles.
+EP_STEPS="${EP_STEPS:-170}"                      # 5.67 s @ 30 Hz. Gives the policy enough real-time for full reach + grasp + lift + place at 0.6 s gripper closure.
 NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-32}"   # halves eval-metric noise vs the trainer's default 16
 

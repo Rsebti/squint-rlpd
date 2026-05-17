@@ -264,22 +264,21 @@ class SO101(BaseAgent):
             upper=None,
             stiffness=1e3,
             damping=1e2,
-            force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 15.0],  # gripper 5x arm torque
+            force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 50.0],  # gripper ~17x arm torque to clamp cube
             normalize_action=False,
         )
 
-        # Delta caps at ±0.0333 rad/step on every joint (30 Hz = ~57 deg/s).
-        # Ablation: uniform across joints since all 6 actuators are STS3215.
-        # Reverted from 0.0873 to test whether the cap bump (rather than
-        # other DR/controller tweaks) was what unlocked the first grasps in
-        # eval1_run8.
+        # Arm caps at ±0.0333 rad/step (30 Hz = ~57°/s, baseline-equivalent
+        # arm velocity). Gripper cap at ±0.10 rad/step (30 Hz = 3.0 rad/s =
+        # ~172°/s, 3× faster than arm) so closure completes in ~0.6 s and
+        # the fingers settle on the cube before the arm has swept past it.
         pd_joint_delta_pos = PDJointPosDelayLagControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.0333] * 6,
-            [ 0.0333] * 6,
+            [-0.0333, -0.0333, -0.0333, -0.0333, -0.0333, -0.10],
+            [ 0.0333,  0.0333,  0.0333,  0.0333,  0.0333,  0.10],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
-            force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 15.0],  # gripper 5x arm torque
+            force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 50.0],  # gripper ~17x arm torque to clamp cube
             use_delta=True,
             use_target=False,
         )
@@ -293,7 +292,7 @@ class SO101(BaseAgent):
             lower=[-1.0, -1.0, -1.0, -1.0, -1.0, -5.0],
             upper=[1.0, 1.0, 1.0, 1.0, 1.0, 5.0],
             damping=[1e2] * 6,
-            force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 15.0],  # gripper 5x arm torque
+            force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 50.0],  # gripper ~17x arm torque to clamp cube
             friction=0,
             normalize_action=True
         )

@@ -433,7 +433,7 @@ class BaseRandomEnv(BaseEnv):
         gripper_joint = self.agent.robot.joints_map["gripper"]
 
         for i, idx in enumerate(env_idx.tolist()):
-            gripper_joint._objs[idx].set_drive_properties(stiffnesses[i], dampings[i], force_limit=3.0)
+            gripper_joint._objs[idx].set_drive_properties(stiffnesses[i], dampings[i], force_limit=50.0)
             self._gripper_stiffness[idx] = stiffnesses[i]
             self._gripper_damping[idx] = dampings[i]
 
