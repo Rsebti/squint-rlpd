@@ -269,13 +269,14 @@ class SO101(BaseAgent):
         )
 
         # Arm caps at ±0.0333 rad/step (30 Hz = ~57°/s, baseline-equivalent
-        # arm velocity). Gripper cap at ±0.10 rad/step (30 Hz = 3.0 rad/s =
-        # ~172°/s, 3× faster than arm) so closure completes in ~0.6 s and
-        # the fingers settle on the cube before the arm has swept past it.
+        # arm velocity). Gripper cap at ±0.05 rad/step (30 Hz = 1.5 rad/s =
+        # ~86°/s, 1.5× faster than arm) — small enough that the PD target
+        # doesn't jump past the cube surface in one tick (reduces solver
+        # interpenetration) while still closing in ~1.2 s.
         pd_joint_delta_pos = PDJointPosDelayLagControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.0333, -0.0333, -0.0333, -0.0333, -0.0333, -0.10],
-            [ 0.0333,  0.0333,  0.0333,  0.0333,  0.0333,  0.10],
+            [-0.0333, -0.0333, -0.0333, -0.0333, -0.0333, -0.05],
+            [ 0.0333,  0.0333,  0.0333,  0.0333,  0.0333,  0.05],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
             force_limit=[3.0, 3.0, 3.0, 3.0, 3.0, 100.0],  # gripper ~33x arm torque (initial Squint value)
