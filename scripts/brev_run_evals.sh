@@ -42,7 +42,7 @@ EVAL1_CKPT="runs/eval1/ckpt.pt"
 
 # ── Single-stage launcher ─────────────────────────────────────────────────────
 run_stage() {
-  local exp_name="$1"; local seed="$2"; local ckpt_path="${3:-}"
+  local exp_name="$1"; local seed="$2"; local n_distractors="$3"; local ckpt_path="${4:-}"
   local extra=()
   if [ -n "$ckpt_path" ]; then
     if [ ! -f "$ckpt_path" ]; then
@@ -57,7 +57,7 @@ run_stage() {
 
   echo ""
   echo "================================================================"
-  echo "  $exp_name | seed=$seed | total=$TOTAL_TIMESTEPS | ep=$EP_STEPS"
+  echo "  $exp_name | seed=$seed | n_distractors=$n_distractors | total=$TOTAL_TIMESTEPS | ep=$EP_STEPS"
   echo "  warm-start: ${ckpt_path:-<none>}    wandb_entity: ${WANDB_ENTITY:-<default>}"
   echo "================================================================"
 
@@ -66,6 +66,7 @@ run_stage() {
     --exp_name="$exp_name" \
     --agent_name="$exp_name" \
     --seed="$seed" \
+    --n_distractors="$n_distractors" \
     --total_timesteps="$TOTAL_TIMESTEPS" \
     --eval_max_episode_steps="$EP_STEPS" \
     --num_envs="$NUM_ENVS" \
@@ -77,11 +78,15 @@ run_stage() {
     "${extra[@]}"
 }
 
-# ── Stage selector (default: all three, sequential) ───────────────────────────
+# ── Stage curriculum (n_distractors increases across stages) ──────────────────
+# eval1: n=0 single cube — learn reach + grasp + place from scratch.
+# eval2: n=1 goal+distractor — warm-start from eval1, learn goal-color disambiguation.
+# eval3: n=3 goal+3 distractors — warm-start from eval1, hardest visual disambiguation.
+# Format: "seed n_distractors [ckpt_path]"
 declare -A STAGES=(
-  [eval1]="1 "
-  [eval2]="2 $EVAL1_CKPT"
-  [eval3]="3 $EVAL1_CKPT"
+  [eval1]="1 0 "
+  [eval2]="2 1 $EVAL1_CKPT"
+  [eval3]="3 3 $EVAL1_CKPT"
 )
 
 REQUESTED=("$@")
