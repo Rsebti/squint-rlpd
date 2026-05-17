@@ -268,6 +268,11 @@ class Place(DefaultCameraEnv):
         self.action_smooth_coef = float(action_smooth_coef)
         self._last_action = None
         self._just_reset_mask = None
+        # Per-env counter of steps the TCP has spent within REACH_CLOSE_DIST
+        # of the cube. Once it crosses REACH_HOLD_STEPS (30 = 1 s @ 30 Hz) the
+        # reach reward shuts off for that env, forcing the policy off the
+        # hover-over-cube plateau and onto the grasp signal.
+        self._reach_close_steps = None
         if not (0 <= n_distractors <= 4):
             # Distractors are placed face-to-face on the target's 4 cardinal
             # faces (one per face), so the geometry caps at 4.
@@ -874,6 +879,8 @@ class Place(DefaultCameraEnv):
             # magnitude of a_0 instead of a true rate ||a_t - a_{t-1}||).
             if self._just_reset_mask is not None:
                 self._just_reset_mask[env_idx] = True
+            if self._reach_close_steps is not None:
+                self._reach_close_steps[env_idx] = 0
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1090,9 +1097,9 @@ class Place(DefaultCameraEnv):
         # lifted clear and stabilised, not just brushed by the fingers.
         is_item_carried = (~item_touching_table) & is_item_static
 
-        # Grasp-only curriculum: success = sustained held grasp this step.
-        # (success_once over an episode = "did it ever hold the cube".)
-        success = is_grasp_held
+        # Grasp-only curriculum: success = bilateral grasp this step.
+        # success_once over an episode = "did it ever close on the cube".
+        success = is_item_grasped
 
         return {
             "inside_x": inside_x,
@@ -1114,18 +1121,34 @@ class Place(DefaultCameraEnv):
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        # Grasp-only curriculum (place/lift/bin terms removed).
-        # Components:
-        #   reach: dense, up to 2.0  — drives fingertip to cube
-        #   grasp: +0.5 when both fingers contact cube ≥ 0.5 N (any angle ok)
-        #   hold:  +0.1 per step while grasped AND cube speed ≤ 3 mm/s
-        #          (30 sustained steps = +3 total, matching the "1 s hold" spec)
-        # Per-step max ≈ 2.6 (used for normalization below).
+        # Grasp-only curriculum, two phases:
+        #   phase 1 (reach):  +up-to-2.0 dense reach reward
+        #     turns OFF for an env once its TCP has been within 2 cm of the
+        #     cube for 30 consecutive control steps (1 s @ 30 Hz). This
+        #     removes the hover-over-cube plateau that traps the policy.
+        #   phase 2 (grasp):  +2.0 when both fingers contact cube ≥ 0.5 N.
+        #     Strictly dominates any residual reach reward, so once reach
+        #     shuts off there is only one gradient to climb.
+        REACH_CLOSE_DIST = 0.02    # 2 cm
+        REACH_HOLD_STEPS = 30      # 1 s @ 30 Hz
+
         tcp_to_item_dist = torch.linalg.norm(self.agent.tcp_pose.p - self.item.pose.p, axis=1)
+
+        # Lazy-init the per-env "steps spent close to cube" counter.
+        if self._reach_close_steps is None or self._reach_close_steps.shape[0] != tcp_to_item_dist.shape[0]:
+            self._reach_close_steps = torch.zeros_like(tcp_to_item_dist, dtype=torch.int32)
+        close_mask = tcp_to_item_dist < REACH_CLOSE_DIST
+        self._reach_close_steps = torch.where(
+            close_mask,
+            self._reach_close_steps + 1,
+            self._reach_close_steps,
+        )
+        reach_active = self._reach_close_steps < REACH_HOLD_STEPS
+
         reaching_reward = 2 * (1 - torch.tanh(5 * tcp_to_item_dist))
-        grasp_reward = 0.5 * info["is_item_grasped"].float()
-        hold_reward  = 0.1 * info["is_grasp_held"].float()
-        reward = reaching_reward + grasp_reward + hold_reward
+        reaching_reward = torch.where(reach_active, reaching_reward, torch.zeros_like(reaching_reward))
+        grasp_reward = 2.0 * info["is_item_grasped"].float()
+        reward = reaching_reward + grasp_reward
 
         # Action-rate penalty (CAPS-style): -coef * ||a_t - a_{t-1}||^2 per env.
         # Suppresses high-frequency policy jitter that a stiff PhysX drive
@@ -1153,7 +1176,8 @@ class Place(DefaultCameraEnv):
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: dict
     ):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 2.6
+        # Max per step ≈ reach 2.0 (only during phase 1) + grasp 2.0 = 4.0.
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 4.0
 
 
 @register_env("SO101PlaceCube-v1", max_episode_steps=300)
