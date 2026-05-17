@@ -10,12 +10,12 @@ set -euo pipefail
 
 EXP_NAME="${1:?usage: brev_pull_ckpt.sh <exp_name>}"
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
-SEED_FOR_STAGE=$(case "$EXP_NAME" in
-  eval1) echo 1 ;;
-  eval2) echo 2 ;;
-  eval3) echo 3 ;;
-  *) echo 1 ;;
-esac)
+case "$EXP_NAME" in
+  eval1) SEED_FOR_STAGE=1 ;;
+  eval2) SEED_FOR_STAGE=2 ;;
+  eval3) SEED_FOR_STAGE=3 ;;
+  *)     SEED_FOR_STAGE=1 ;;
+esac
 SEED="${SEED:-$SEED_FOR_STAGE}"
 
 WANDB_ENTITY="${WANDB_ENTITY:?set WANDB_ENTITY first}"

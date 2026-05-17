@@ -35,7 +35,7 @@ JOINT_NAMES = ["pan", "lift", "elbow", "wrist_flex", "wrist_roll", "gripper"]
 # ║  EDIT THESE for your robot                                                ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 ROBOT_PORT = "/dev/cu.usbmodem5B141129871"               # Mac: /dev/cu.usbmodemXXXX  (run: ls /dev/cu.*)
-CAMERA_INDEX = 0                          # webcam index: try 0, 1, or 2
+CAMERA_INDEX = 0
 CALIBRATION_ID = "so101_follower_arm"     # filename (no extension) of your calibration .json
 CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .json
 
