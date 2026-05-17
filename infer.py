@@ -65,7 +65,7 @@ def create_real_robot():
         port=ROBOT_PORT,
         use_degrees=True,
         cameras={"base_camera": OpenCVCameraConfig(
-            index_or_path=CAMERA_INDEX, fps=30, width=640, height=480,
+            index_or_path=CAMERA_INDEX, fps=30, width=1920, height=1080,
         )},
         id=CALIBRATION_ID,
         calibration_dir=CALIBRATION_DIR,
