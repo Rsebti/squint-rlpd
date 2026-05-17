@@ -177,8 +177,13 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     # used the same value for both, missing this asymmetry — the cube was
     # slipping out of the fingers because dynamic == static was too low for
     # a stable grasp.
-    item_static_friction_range:  Sequence[float] = (1.2, 2.0)
-    item_dynamic_friction_range: Sequence[float] = (0.5, 1.0)
+    # Reverted to the initial-Squint single (0.1, 0.5) range for both static
+    # and dynamic. Empirically the higher (1.2, 2.0)/(0.5, 1.0) split did not
+    # fix cube slip — the slip is governed by gripper force_limit and contact
+    # dynamics, not the cube material μ. Initial Squint's low-friction values
+    # worked when paired with force_limit=100 on the gripper (now restored).
+    item_static_friction_range:  Sequence[float] = (0.1, 0.5)
+    item_dynamic_friction_range: Sequence[float] = (0.1, 0.5)
     # Restitution for the cubes — disabled (fully inelastic, no bounce).
     item_restitution_range: Sequence[float] = (0.0, 0.0)
     # Mass range in kg. Sampled directly per env; the per-env density passed
