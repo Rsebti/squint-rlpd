@@ -71,7 +71,7 @@ class RandomizationConfig:
     """Per-episode arm-joint stiffness DR. Centre 1100, ±18% spread."""
     arm_damping_range: Sequence[float] = (80.0, 120.0)
     """Per-episode arm-joint damping DR. Centre 100, ±20% spread."""
-    action_delay_steps_range: Sequence[int] = (2, 2)
+    action_delay_steps_range: Sequence[int] = (0, 0)
     """Inclusive integer range for per-env actuator delay (control steps).
     Pinned to 2 (= 66.7 ms at 30 Hz) — closest discrete approximation of
     the measured 60 ms STS3215 dead time, well under the 70 ms hard cap.
@@ -149,7 +149,7 @@ class RandomizationConfig:
     # Measured 2026-05-15: ~49.4 ms camera-only lag at 30 Hz control
     # (cmd -> first visual motion - cmd -> servo motion). Range (1, 2)
     # corresponds to ~33-66 ms in 33.3 ms slots, ±17 ms half-spread.
-    obs_delay_steps_range: Sequence[int] = (1, 2)
+    obs_delay_steps_range: Sequence[int] = (0, 0)
     """Inclusive integer range for per-env observation (RGB) delay in control steps. Centre is 1 → ~33 ms at 30 Hz; bracketing the measured 49 ms ± frame quantisation."""
     max_obs_delay_steps: int = 3
     """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
