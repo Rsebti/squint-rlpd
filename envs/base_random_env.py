@@ -71,12 +71,12 @@ class RandomizationConfig:
     """Per-episode arm-joint stiffness DR. Centre 1100, ±18% spread."""
     arm_damping_range: Sequence[float] = (80.0, 120.0)
     """Per-episode arm-joint damping DR. Centre 100, ±20% spread."""
-    action_delay_steps_range: Sequence[int] = (0, 0)
+    action_delay_steps_range: Sequence[int] = (1, 1)
     """Inclusive integer range for per-env actuator delay (control steps).
-    Pinned to 2 (= 66.7 ms at 30 Hz) — closest discrete approximation of
-    the measured 60 ms STS3215 dead time, well under the 70 ms hard cap.
-    No delay-DR variation; the 30 Hz step granularity (33 ms) is too coarse
-    to express the ~20 ms DR window without exceeding the cap."""
+    At 10 Hz, 1 step = 100 ms — closest discrete approximation of the
+    measured 60 ms STS3215 dead time (rounds up; 0 steps would be 0 ms,
+    too far below the measured value). Pinned to 1, no DR variation
+    because the 100 ms granularity is too coarse to randomize."""
     lag_alpha_range: Sequence[float] = (1.0, 1.0)
     """Per-episode first-order-lag EMA mix. 1.0 = no lag (commanded target
     arrives instantly through the EMA filter). Kept off so the only response
@@ -146,11 +146,12 @@ class RandomizationConfig:
     """If True, additionally jitter wrist-camera roll over the discrete set {0°, 90°, 180°, 270°} per episode. Use for a robustness-phase curriculum: trains the policy to handle a misoriented wrist camera. Continuous roll noise (wrist_camera_rot_noise[0]) is applied on top of the discrete choice."""
 
     # === Observation latency (camera lag) ===
-    # Measured 2026-05-15: ~49.4 ms camera-only lag at 30 Hz control
-    # (cmd -> first visual motion - cmd -> servo motion). Range (1, 2)
-    # corresponds to ~33-66 ms in 33.3 ms slots, ±17 ms half-spread.
-    obs_delay_steps_range: Sequence[int] = (0, 0)
-    """Inclusive integer range for per-env observation (RGB) delay in control steps. Centre is 1 → ~33 ms at 30 Hz; bracketing the measured 49 ms ± frame quantisation."""
+    # Measured 2026-05-15: ~49.4 ms camera-only lag.
+    # At 10 Hz control (100 ms/step), 0 = no delay, 1 = 100 ms. The (0, 1)
+    # range averages 50 ms per env which brackets the measured 49 ms with
+    # the best resolution available at this control rate.
+    obs_delay_steps_range: Sequence[int] = (0, 1)
+    """Inclusive integer range for per-env observation (RGB) delay in control steps. (0, 1) at 10 Hz averages 50 ms — brackets measured 49.4 ms camera lag."""
     max_obs_delay_steps: int = 3
     """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
 
