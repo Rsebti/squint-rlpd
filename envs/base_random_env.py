@@ -71,10 +71,12 @@ class RandomizationConfig:
     """Per-episode arm-joint stiffness DR. Centre 1100, ±18% spread."""
     arm_damping_range: Sequence[float] = (80.0, 120.0)
     """Per-episode arm-joint damping DR. Centre 100, ±20% spread."""
-    action_delay_steps_range: Sequence[int] = (1, 1)
+    action_delay_steps_range: Sequence[int] = (0, 0)
     """Inclusive integer range for per-env actuator delay (control steps).
-    At 10 Hz, 1 step = 100 ms. Closest discrete approximation of the
-    measured 60 ms STS3215 dead time (over-models by ~40 ms)."""
+    Set to 0: combined with obs_delay=1 this gives a single-step round-trip
+    (image taken at t=0 → control applied at t=1 = 100 ms). With both at 1
+    the round-trip would be 200 ms, which over-models the real total
+    (camera 49 ms + servo 60 ms ≈ 110 ms) by nearly 2×."""
     lag_alpha_range: Sequence[float] = (1.0, 1.0)
     """Per-episode first-order-lag EMA mix. 1.0 = no lag (commanded target
     arrives instantly through the EMA filter). Kept off so the only response
