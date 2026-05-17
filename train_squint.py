@@ -149,8 +149,8 @@ class Args:
     """automatic tuning of the entropy coefficient"""
     bootstrap_at_done: str = "always"
     """bootstrap method when episode ends. Options: ['always', 'never', 'on_truncation']"""
-    gamma: float = 0.965
-    """the discount factor gamma per step. 0.965 at 30 Hz preserves the per-second discount of 0.9 at 10 Hz (= 0.9 ** (1/3))."""
+    gamma: float = 0.9
+    """the discount factor gamma per step. 0.9 at 10 Hz (baseline 4398ce9 value)."""
     tau: float = 0.01
     """target smoothing coefficient"""
     num_q: int = 2

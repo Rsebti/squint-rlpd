@@ -71,11 +71,10 @@ class RandomizationConfig:
     """Per-episode arm-joint stiffness DR. Centre 1100, ±18% spread."""
     arm_damping_range: Sequence[float] = (80.0, 120.0)
     """Per-episode arm-joint damping DR. Centre 100, ±20% spread."""
-    action_delay_steps_range: Sequence[int] = (0, 0)
+    action_delay_steps_range: Sequence[int] = (1, 1)
     """Inclusive integer range for per-env actuator delay (control steps).
-    Set to zero: ablation isolating whether 30 Hz control alone causes the
-    earlier learning failure. Latency will be re-added once we confirm
-    30 Hz + force_limit=100 trains correctly without it."""
+    At 10 Hz, 1 step = 100 ms. Closest discrete approximation of the
+    measured 60 ms STS3215 dead time (over-models by ~40 ms)."""
     lag_alpha_range: Sequence[float] = (1.0, 1.0)
     """Per-episode first-order-lag EMA mix. 1.0 = no lag (commanded target
     arrives instantly through the EMA filter). Kept off so the only response
@@ -145,10 +144,10 @@ class RandomizationConfig:
     """If True, additionally jitter wrist-camera roll over the discrete set {0°, 90°, 180°, 270°} per episode. Use for a robustness-phase curriculum: trains the policy to handle a misoriented wrist camera. Continuous roll noise (wrist_camera_rot_noise[0]) is applied on top of the discrete choice."""
 
     # === Observation latency (camera lag) ===
-    # Disabled (0, 0) for this ablation. At 30 Hz, (1, 2) would cleanly
-    # bracket the measured 49 ms camera lag (avg 50 ms) — re-enable later.
-    obs_delay_steps_range: Sequence[int] = (0, 0)
-    """Inclusive integer range for per-env observation (RGB) delay in control steps. Disabled for ablation."""
+    # At 10 Hz, 1 step = 100 ms. Closest discrete approximation of the
+    # measured 49 ms camera lag (over-models by ~50 ms).
+    obs_delay_steps_range: Sequence[int] = (1, 1)
+    """Inclusive integer range for per-env observation (RGB) delay in control steps. 1 step = 100 ms at 10 Hz."""
     max_obs_delay_steps: int = 3
     """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
 
@@ -211,7 +210,7 @@ class BaseRandomEnv(BaseEnv):
 
     @property
     def _default_sim_config(self):
-        return SimConfig(sim_freq=300, control_freq=30)
+        return SimConfig(sim_freq=100, control_freq=10)
 
     @property
     def _default_human_render_camera_configs(self):

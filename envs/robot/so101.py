@@ -268,14 +268,12 @@ class SO101(BaseAgent):
             normalize_action=False,
         )
 
-        # At 30 Hz control, delta caps scaled by 1/3 vs 10 Hz baseline to
-        # preserve the same physical velocities:
-        #   arm ±0.0167 rad/step × 30 Hz = 0.5 rad/s (= baseline 10 Hz value)
-        #   gripper ±0.0667 rad/step × 30 Hz = 2.0 rad/s (= baseline 10 Hz value)
+        # 10 Hz baseline caps: arm ±0.05 rad/step = 0.5 rad/s,
+        # gripper ±0.2 rad/step = 2.0 rad/s.
         pd_joint_delta_pos = PDJointPosDelayLagControllerConfig(
             [joint.name for joint in self.robot.active_joints],
-            [-0.0167, -0.0167, -0.0167, -0.0167, -0.0167, -0.0667],
-            [ 0.0167,  0.0167,  0.0167,  0.0167,  0.0167,  0.0667],
+            [-0.05, -0.05, -0.05, -0.05, -0.05, -0.2],
+            [ 0.05,  0.05,  0.05,  0.05,  0.05,  0.2],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
             force_limit=100,  # uniform 100 N·m, matches baseline 4398ce9 (rigid arm under contact)
