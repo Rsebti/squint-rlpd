@@ -1065,7 +1065,7 @@ class Place(DefaultCameraEnv):
         item_lifted = self.item.pose.p[..., -1] >= (self.item_half_sizes + 1e-3)
 
         item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
-        is_item_static = item_vel <= 2e-2
+        is_item_static = item_vel <= 1e-2  # tightened from 2e-2 -> 1e-2 (1 cm/s)
         is_item_grasped = self.agent.is_grasping(self.item)
         is_robot_static = self.agent.is_static()
 
@@ -1073,6 +1073,20 @@ class Place(DefaultCameraEnv):
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
         robot_touching_bin = self.agent.is_touching(self.bin)
         robot_touching_item = self.agent.is_touching(self.item)
+        # Cube-table contact: PhysX pairwise contact force, threshold 1e-2 N.
+        # Anything above ~0.01 N means a real contact pair exists (a cube
+        # sitting on the table has ~0.05 N of normal force from its 5 g weight,
+        # so 0.01 is well below resting contact and above numerical noise).
+        item_table_force = torch.linalg.norm(
+            self.scene.get_pairwise_contact_forces(self.item, self.table_scene.table), axis=-1)
+        item_touching_table = item_table_force >= 1e-2
+
+        # "Carried" = cube is OFF the table AND moving slowly with the gripper
+        # (i.e., truly being held, not sliding on the table surface). Used in
+        # the reward formula in place of the raw is_item_grasped signal so the
+        # policy only collects the +3 bonus when the cube has actually been
+        # lifted clear and stabilised, not just brushed by the fingers.
+        is_item_carried = (~item_touching_table) & is_item_static
 
         success = is_item_above_bin & (~robot_touching_item) & is_robot_static & (~robot_touching_bin)
 
@@ -1086,10 +1100,12 @@ class Place(DefaultCameraEnv):
             "success": success,
             "is_item_above_bin": is_item_above_bin,
             "is_item_grasped": is_item_grasped,
+            "is_item_carried": is_item_carried,
             "is_robot_static": is_robot_static,
             "robot_touching_table": robot_touching_table,
             "robot_touching_bin": robot_touching_bin,
             "robot_touching_item": robot_touching_item,
+            "item_touching_table": item_touching_table,
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
@@ -1126,7 +1142,11 @@ class Place(DefaultCameraEnv):
         gripper_openness = (self.agent.robot.get_qpos()[:, -1] - gripper_min) / (gripper_max - gripper_min)
 
         # Grasped: 3 + place_reward
-        reward[info["is_item_grasped"]] = (3 + place_reward)[info["is_item_grasped"]]
+        # +3 grasp bonus fires only when the cube is genuinely carried —
+        # off the table AND moving slowly (≤1 cm/s) — not just brushed by
+        # the fingers. Stops the policy from collecting reward by sliding
+        # the cube along the table or by transient finger contacts.
+        reward[info["is_item_carried"]] = (3 + place_reward)[info["is_item_carried"]]
 
         # Above bin: 3 + place_reward + gripper_openness
         is_item_dropped = (~info["robot_touching_item"]).float()
