@@ -23,7 +23,7 @@ cd "${REPO_DIR:-$HOME/squint}"
 # ── Knobs (edit here, not on the command line) ────────────────────────────────
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
-EP_STEPS="${EP_STEPS:-75}"                       # 7.5 s @ 10 Hz. Matches 4398ce9 baseline timescale.
+EP_STEPS="${EP_STEPS:-225}"                      # 7.5 s @ 30 Hz. Same real-time as 10 Hz baseline (75 steps).
 NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-32}"   # halves eval-metric noise vs the trainer's default 16
 BUFFER_SIZE="${BUFFER_SIZE:-3000000}"  # 3M transitions (~5 GB host RAM). Keeps more diverse experience; pure sample-efficiency win on A100 80GB / 117GB RAM.

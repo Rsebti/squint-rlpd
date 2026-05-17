@@ -71,12 +71,11 @@ class RandomizationConfig:
     """Per-episode arm-joint stiffness DR. Centre 1100, ±18% spread."""
     arm_damping_range: Sequence[float] = (80.0, 120.0)
     """Per-episode arm-joint damping DR. Centre 100, ±20% spread."""
-    action_delay_steps_range: Sequence[int] = (1, 1)
+    action_delay_steps_range: Sequence[int] = (0, 0)
     """Inclusive integer range for per-env actuator delay (control steps).
-    At 10 Hz, 1 step = 100 ms — closest discrete approximation of the
-    measured 60 ms STS3215 dead time (rounds up; 0 steps would be 0 ms,
-    too far below the measured value). Pinned to 1, no DR variation
-    because the 100 ms granularity is too coarse to randomize."""
+    Set to zero: ablation isolating whether 30 Hz control alone causes the
+    earlier learning failure. Latency will be re-added once we confirm
+    30 Hz + force_limit=100 trains correctly without it."""
     lag_alpha_range: Sequence[float] = (1.0, 1.0)
     """Per-episode first-order-lag EMA mix. 1.0 = no lag (commanded target
     arrives instantly through the EMA filter). Kept off so the only response
@@ -146,12 +145,10 @@ class RandomizationConfig:
     """If True, additionally jitter wrist-camera roll over the discrete set {0°, 90°, 180°, 270°} per episode. Use for a robustness-phase curriculum: trains the policy to handle a misoriented wrist camera. Continuous roll noise (wrist_camera_rot_noise[0]) is applied on top of the discrete choice."""
 
     # === Observation latency (camera lag) ===
-    # Measured 2026-05-15: ~49.4 ms camera-only lag.
-    # At 10 Hz control (100 ms/step), 0 = no delay, 1 = 100 ms. The (0, 1)
-    # range averages 50 ms per env which brackets the measured 49 ms with
-    # the best resolution available at this control rate.
-    obs_delay_steps_range: Sequence[int] = (0, 1)
-    """Inclusive integer range for per-env observation (RGB) delay in control steps. (0, 1) at 10 Hz averages 50 ms — brackets measured 49.4 ms camera lag."""
+    # Disabled (0, 0) for this ablation. At 30 Hz, (1, 2) would cleanly
+    # bracket the measured 49 ms camera lag (avg 50 ms) — re-enable later.
+    obs_delay_steps_range: Sequence[int] = (0, 0)
+    """Inclusive integer range for per-env observation (RGB) delay in control steps. Disabled for ablation."""
     max_obs_delay_steps: int = 3
     """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
 
@@ -214,7 +211,7 @@ class BaseRandomEnv(BaseEnv):
 
     @property
     def _default_sim_config(self):
-        return SimConfig(sim_freq=100, control_freq=10)
+        return SimConfig(sim_freq=300, control_freq=30)
 
     @property
     def _default_human_render_camera_configs(self):
