@@ -269,7 +269,7 @@ class Place(DefaultCameraEnv):
         self._last_action = None
         self._just_reset_mask = None
         # Per-env counter of steps the TCP has spent within REACH_CLOSE_DIST
-        # of the cube. Once it crosses REACH_HOLD_STEPS (30 = 1 s @ 30 Hz) the
+        # of the cube. Once it crosses REACH_HOLD_STEPS (10 = 1 s @ 10 Hz) the
         # reach reward shuts off for that env, forcing the policy off the
         # hover-over-cube plateau and onto the grasp signal.
         self._reach_close_steps = None
@@ -1130,7 +1130,7 @@ class Place(DefaultCameraEnv):
         #     Strictly dominates any residual reach reward, so once reach
         #     shuts off there is only one gradient to climb.
         REACH_CLOSE_DIST = 0.02    # 2 cm
-        REACH_HOLD_STEPS = 30      # 1 s @ 30 Hz
+        REACH_HOLD_STEPS = 10      # 1 s @ 10 Hz
 
         tcp_to_item_dist = torch.linalg.norm(self.agent.tcp_pose.p - self.item.pose.p, axis=1)
 

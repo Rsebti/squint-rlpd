@@ -213,7 +213,7 @@ class BaseRandomEnv(BaseEnv):
 
     @property
     def _default_sim_config(self):
-        return SimConfig(sim_freq=300, control_freq=30)
+        return SimConfig(sim_freq=100, control_freq=10)
 
     @property
     def _default_human_render_camera_configs(self):
