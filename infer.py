@@ -21,8 +21,60 @@ import torch.nn as nn
 
 from lerobot.robots.utils import make_robot_from_config
 from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.motors.motors_bus import MotorNormMode
+
+import threading
+
+
+class Cv2Camera:
+    """Drop-in replacement for lerobot's OpenCVCamera on macOS.
+
+    lerobot's wrapper uses cv2.CAP_ANY (backend code 0) which on macOS
+    flakily times out in async_read despite the read thread being alive.
+    This class uses CAP_AVFOUNDATION explicitly and runs a tiny background
+    reader so async_read() just hands back the latest frame."""
+
+    def __init__(self, index: int, width: int = 1280, height: int = 720, fps: int = 30):
+        self.cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cv2Camera({index}) failed to open via AVFoundation.")
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        # macOS AVFoundation often needs a warm-up of a few hundred ms + several
+        # discarded frames before the sensor delivers a valid one. Retry up to
+        # ~3 s of polling at 30 Hz.
+        frame = None
+        for _ in range(90):
+            ok, frame = self.cap.read()
+            if ok and frame is not None:
+                break
+            time.sleep(0.033)
+        if frame is None:
+            self.cap.release()
+            raise RuntimeError(f"Cv2Camera({index}) opened but no frame after 3 s of polling.")
+        self._latest = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            ok, frame = self.cap.read()
+            if ok and frame is not None:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                with self._lock:
+                    self._latest = rgb
+
+    def async_read(self):
+        with self._lock:
+            return self._latest.copy()
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=1)
+        self.cap.release()
 
 try:
     import rerun as rr
@@ -61,12 +113,12 @@ REST_QPOS = np.array([0, 0, 0, np.pi / 2, 0.0, np.deg2rad(60)], dtype=np.float32
 # ║  Robot driver — wraps a LeRobot SO101 follower                            ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 def create_real_robot():
+    # Camera handled by our own Cv2Camera (see RealRobotAgent.__init__);
+    # lerobot's wrapper is bypassed because its CAP_ANY backend is flaky on macOS.
     config = SO101FollowerConfig(
         port=ROBOT_PORT,
         use_degrees=True,
-        cameras={"base_camera": OpenCVCameraConfig(
-            index_or_path=CAMERA_INDEX, fps=30, width=1920, height=1080,
-        )},
+        cameras={},
         id=CALIBRATION_ID,
         calibration_dir=CALIBRATION_DIR,
     )
@@ -88,6 +140,8 @@ class RealRobotAgent:
         self._g_sim_range = self._g_sim_max - self._g_sim_min
         self._g_servo_range = self._g_servo_max - self._g_servo_min
         robot.bus.motors["gripper"].norm_mode = MotorNormMode.DEGREES
+        # Bypass lerobot's flaky macOS camera wrapper.
+        self.cameras = {"base_camera": Cv2Camera(index=CAMERA_INDEX, width=1280, height=720, fps=30)}
 
     def get_qpos(self):
         """Measured joint angles in sim radians, shape (1, 6)."""
@@ -125,7 +179,7 @@ class RealRobotAgent:
 
     def capture_sensor_data(self):
         self._sensor_data = {}
-        for name, cam in self.real_robot.cameras.items():
+        for name, cam in self.cameras.items():
             frame = np.asarray(cam.async_read())                        # (H, W, 3) uint8 RGB
             self._sensor_data[name] = {"rgb": torch.from_numpy(frame).unsqueeze(0)}
 

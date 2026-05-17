@@ -25,7 +25,7 @@ ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"   # 20M per stage
 EP_STEPS="${EP_STEPS:-75}"                       # 7.5 s @ 10 Hz. Matches baseline timescale.
 NUM_ENVS="${NUM_ENVS:-3072}"           # A100 80GB sweet spot; drop to 2048 on L40S/48GB
-NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-32}"   # halves eval-metric noise vs the trainer's default 16
+NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-128}"  # 4× the trainer default (16). At low success rates (p~0.05), SE drops from ~0.04 (N=32) to ~0.02 (N=128) — needed to see real signal vs noise.
 BUFFER_SIZE="${BUFFER_SIZE:-3000000}"  # 3M transitions (~5 GB host RAM). Keeps more diverse experience; pure sample-efficiency win on A100 80GB / 117GB RAM.
 NUM_UPDATES="${NUM_UPDATES:-384}"      # SAC gradient steps per env step (default 256). Uses the GPU-util headroom from being kernel-launch bound.
 
