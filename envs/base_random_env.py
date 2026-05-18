@@ -155,16 +155,23 @@ class RandomizationConfig:
     max_obs_delay_steps: int = 3
     """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
 
-    # Substep-aligned camera lag. At sim_freq=100 / control_freq=10 there are
-    # 10 physics substeps per action; we render the camera at substep
-    # (sim_steps_per_control - camera_lag_substeps), which means the image
-    # the policy reads at decision time t was sampled `camera_lag_substeps *
-    # sim_dt` *before* t. Measured real cam lag is 49 ms → K=5 substeps at
-    # 100 Hz physics = 50 ms. This gives ~10 ms granularity instead of the
-    # 100 ms granularity of `obs_delay_steps_range`.
-    # Set to 0 to disable (image rendered at end of control step, no lag).
-    camera_lag_substeps: int = 5
-    """Substeps before the control-step boundary at which the camera is rendered. 5 @ sim_freq=100 = 50 ms ≈ measured 49 ms real camera lag."""
+    # Substep-aligned camera lag (per env). At sim_freq=100 / control_freq=10
+    # there are 10 physics substeps per control step (10 ms each). For each
+    # env we sample K ∈ [k_lo, k_hi] substeps and render the camera at
+    # substep (sim_steps_per_control - K) — i.e. the image the policy reads
+    # at decision time t was sampled K * 10 ms *before* t. Models the real
+    # camera→control latency window (measured ~10–50 ms on this setup).
+    #
+    # The control step itself is applied INSTANTLY (no actuator delay; see
+    # action_delay_steps_range above).
+    #
+    # To turn the latency model OFF entirely, set this to (0, 0): images are
+    # rendered at the end of the control step (lag = 0 ms).
+    #
+    # Cost note: each unique K in the range triggers an extra mid-step render,
+    # so range width W → W renders per control step (vs. 1 with lag disabled).
+    camera_lag_substeps_range: Sequence[int] = (1, 5)
+    """Per-env inclusive integer range of camera-lag substeps. 10 ms per substep at sim_freq=100 → (1,5) = 10–50 ms lag. (0, 0) disables."""
 
     # === Image-pipeline domain randomization ===
     # Applied to every RGB sensor frame BEFORE the policy sees it, to bracket
@@ -205,6 +212,8 @@ class BaseRandomEnv(BaseEnv):
         *args,
         domain_randomization_config: Union[RandomizationConfig, dict] = RandomizationConfig(),
         domain_randomization: bool = True,
+        sim_freq: int = 100,
+        control_freq: int = 10,
         **kwargs,
     ):
         self.domain_randomization = domain_randomization
@@ -226,12 +235,17 @@ class BaseRandomEnv(BaseEnv):
         self._mid_step_sensor_cache: dict = {}
         self._current_substep: int = 0
 
+        # Stashed for _default_sim_config override (must be set BEFORE
+        # super().__init__ since the property is read during sim setup).
+        self._sim_freq = int(sim_freq)
+        self._control_freq = int(control_freq)
+
         super().__init__(*args, **kwargs)
 
 
     @property
     def _default_sim_config(self):
-        return SimConfig(sim_freq=100, control_freq=10)
+        return SimConfig(sim_freq=self._sim_freq, control_freq=self._control_freq)
 
     @property
     def _default_human_render_camera_configs(self):
@@ -600,9 +614,9 @@ class BaseRandomEnv(BaseEnv):
     # measurement (~49 ms at 30 Hz).
 
     def _randomize_camera_latency(self, env_idx: torch.Tensor):
-        """Sample per-env obs_delay_steps. Always called at episode init so
-        downstream code can read self._obs_delay_per_env uniformly even when
-        DR is off (then it holds the centre)."""
+        """Sample per-env obs_delay_steps AND substep-aligned camera_lag.
+        Always called at episode init so downstream code can read the per-env
+        tensors uniformly even when DR is off (then they hold the centre)."""
         cfg = self.domain_randomization_config
         d_lo, d_hi = cfg.obs_delay_steps_range
         max_d = int(cfg.max_obs_delay_steps)
@@ -611,14 +625,32 @@ class BaseRandomEnv(BaseEnv):
             self._obs_delay_per_env = torch.full(
                 (self.num_envs,), default,
                 dtype=torch.long, device=self.device).clamp(0, max_d)
-        if not self.domain_randomization or d_lo == d_hi:
+
+        # Substep camera lag (per env). Lazy-allocate at config centre so it
+        # exists even when DR is off.
+        k_lo, k_hi = cfg.camera_lag_substeps_range
+        if not hasattr(self, "_camera_lag_per_env"):
+            default_k = int(round((k_lo + k_hi) / 2))
+            self._camera_lag_per_env = torch.full(
+                (self.num_envs,), default_k,
+                dtype=torch.long, device=self.device)
+
+        if not self.domain_randomization:
             return
-        # Uniform integer sample over [d_lo, d_hi] inclusive.
-        delays_f = self._batched_episode_rng[env_idx].uniform(
-            float(d_lo), float(d_hi) + 1.0 - 1e-6)
-        delays = np.clip(np.floor(delays_f).astype(np.int64), d_lo, d_hi)
-        self._obs_delay_per_env[env_idx.to(self.device)] = torch.as_tensor(
-            delays, dtype=torch.long, device=self.device)
+        # Uniform integer sample over [d_lo, d_hi] inclusive (obs_delay).
+        if d_lo != d_hi:
+            delays_f = self._batched_episode_rng[env_idx].uniform(
+                float(d_lo), float(d_hi) + 1.0 - 1e-6)
+            delays = np.clip(np.floor(delays_f).astype(np.int64), d_lo, d_hi)
+            self._obs_delay_per_env[env_idx.to(self.device)] = torch.as_tensor(
+                delays, dtype=torch.long, device=self.device)
+        # Uniform integer sample over [k_lo, k_hi] inclusive (camera_lag).
+        if k_lo != k_hi:
+            ks_f = self._batched_episode_rng[env_idx].uniform(
+                float(k_lo), float(k_hi) + 1.0 - 1e-6)
+            ks = np.clip(np.floor(ks_f).astype(np.int64), k_lo, k_hi)
+            self._camera_lag_per_env[env_idx.to(self.device)] = torch.as_tensor(
+                ks, dtype=torch.long, device=self.device)
 
     def _apply_obs_delay(self, sensor_name: str, rgb: torch.Tensor) -> torch.Tensor:
         """Push the current frame into a per-sensor circular buffer and
@@ -852,12 +884,13 @@ class BaseRandomEnv(BaseEnv):
         self._wrist_camera_dr_offsets[env_idx.to(self.device)] = rand * scales
 
     # ── Substep-aligned camera lag ─────────────────────────────────────────
-    # We render the camera at substep `sim_steps_per_control -
-    # camera_lag_substeps` instead of the default end-of-control-step. The
-    # image the policy reads at decision time t was therefore sampled
-    # camera_lag_substeps * sim_dt before t (5 substeps × 10 ms = 50 ms ≈
-    # measured real cam lag 49 ms). The cached render is returned in place
-    # of a fresh end-of-step render, so we don't double-pay GPU rendering.
+    # Per-env substep camera lag. At each substep s we check whether ANY env
+    # in this rollout wants a frame sampled at lag K = sim_steps_per_control
+    # - s. If so we render once (rendering is GPU-batched across all envs)
+    # and cache the [num_envs, ...] tensor under key K. At obs-fetch time we
+    # gather per-env: env e reads from cache[K_env_e]. Total renders per
+    # control step = number of distinct K values present across envs (up to
+    # k_hi - k_lo + 1). Set camera_lag_substeps_range=(0,0) to disable.
 
     def _before_control_step(self):
         # Reset substep counter and stale cache at the START of each action.
@@ -869,16 +902,18 @@ class BaseRandomEnv(BaseEnv):
         super()._after_simulation_step()
         self._current_substep += 1
         cfg = self.domain_randomization_config
-        if cfg.camera_lag_substeps <= 0:
+        k_lo, k_hi = cfg.camera_lag_substeps_range
+        if k_hi <= 0:
+            return  # lag disabled
+        # K = how many substeps before end-of-control-step we are right now.
+        K_current = self._sim_steps_per_control - self._current_substep
+        if K_current < k_lo or K_current > k_hi:
+            return  # outside the lag window
+        if not hasattr(self, "_camera_lag_per_env"):
+            return  # no per-env lag sampled yet (very first call)
+        # Render only if at least one env actually wants this K value.
+        if not (self._camera_lag_per_env == K_current).any():
             return
-        # Render at the substep whose offset from end-of-step equals
-        # camera_lag_substeps (= the "real-time age" of the frame).
-        trigger = self._sim_steps_per_control - int(cfg.camera_lag_substeps)
-        if self._current_substep != trigger:
-            return
-        # Hide objects flagged for hiding, update sensors, and snapshot the
-        # frame for each Camera. We keep `_mid_step_sensor_cache` keyed by
-        # sensor name so multiple cameras each lag in their own slot.
         for obj in self._hidden_objects:
             obj.hide_visual()
         self.scene.update_render(
@@ -893,21 +928,53 @@ class BaseRandomEnv(BaseEnv):
                 segmentation=self.obs_mode_struct.visual.segmentation,
                 apply_texture_transforms=True,
             )
-            # Detach from any active CUDA graph and clone so subsequent
-            # substeps' physics changes don't leak into the cached tensor.
-            self._mid_step_sensor_cache[name] = {
+            # Cache shape: {sensor_name: {K: {modality: tensor[num_envs, ...]}}}
+            self._mid_step_sensor_cache.setdefault(name, {})[K_current] = {
                 k: v.detach().clone() if hasattr(v, "detach") else v
                 for k, v in obs.items()
             }
 
+    def _gather_per_env_substep_obs(self) -> dict:
+        """Build a per-env sensor obs dict from the per-K substep cache.
+
+        Cache layout: {sensor: {K: {modality: tensor[num_envs, ...]}}}
+        Output:       {sensor: {modality: tensor[num_envs, ...]}}
+        Env e reads modality m from cache[sensor][K_env_e][m][e]. Falls back
+        to the nearest-K cached frame if an env's K wasn't rendered (rare —
+        only at the very first reset before _after_simulation_step has run).
+        """
+        out: dict = {}
+        device = self._camera_lag_per_env.device
+        for sensor_name, k_caches in self._mid_step_sensor_cache.items():
+            if not k_caches:
+                continue
+            available_ks = sorted(k_caches.keys())
+            ks_tensor = torch.tensor(available_ks, dtype=torch.long, device=device)
+            # For each env, pick the cached K closest to its target K.
+            target_k = self._camera_lag_per_env.unsqueeze(1)              # (N,1)
+            diff = (ks_tensor.unsqueeze(0) - target_k).abs()              # (N, |Ks|)
+            chosen_idx = diff.argmin(dim=1)                                # (N,) into available_ks
+            sample_modalities = next(iter(k_caches.values()))
+            merged: dict = {}
+            for mod_name, sample_val in sample_modalities.items():
+                if hasattr(sample_val, "shape") and sample_val.shape[0] == self.num_envs:
+                    gathered = torch.empty_like(sample_val)
+                    for j, K_val in enumerate(available_ks):
+                        mask = (chosen_idx == j)
+                        if mask.any():
+                            gathered[mask] = k_caches[K_val][mod_name][mask]
+                    merged[mod_name] = gathered
+                else:
+                    merged[mod_name] = sample_val
+            out[sensor_name] = merged
+        return out
+
     # ── Obs hook: apply latency + image-pipeline DR to every RGB sensor ─────
     def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
         cfg = self.domain_randomization_config
-        if cfg.camera_lag_substeps > 0 and self._mid_step_sensor_cache:
-            # Use the substep-K cache; the super's update_render would
-            # overwrite the freshly-rendered GPU buffer with end-of-step
-            # state and we'd lose the lag.
-            sensor_obs = self._mid_step_sensor_cache
+        k_lo, k_hi = cfg.camera_lag_substeps_range
+        if k_hi > 0 and self._mid_step_sensor_cache:
+            sensor_obs = self._gather_per_env_substep_obs()
         else:
             sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
         for name, data in sensor_obs.items():

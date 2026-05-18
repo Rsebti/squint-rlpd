@@ -283,8 +283,12 @@ class KeyboardController:
         self.old_settings = None
 
     def __enter__(self):
-        self.old_settings = termios.tcgetattr(sys.stdin)
-        tty.setcbreak(sys.stdin.fileno())
+        try:
+            self.old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        except (termios.error, ValueError):
+            # No tty (running headless / piped stdin) — disable key polling.
+            self.old_settings = None
         return self
 
     def __exit__(self, *args):
@@ -293,6 +297,8 @@ class KeyboardController:
 
     def check_key(self) -> Optional[str]:
         """Check for keyboard input without blocking. Returns key or None."""
+        if self.old_settings is None:
+            return None
         if select.select([sys.stdin], [], [], 0)[0]:
             return sys.stdin.read(1)
         return None
@@ -380,7 +386,7 @@ def main(args: Args):
     print("Setting up robot and environment...")
 
     real_robot = create_real_robot()
-    real_robot.connect()
+    real_robot.connect(calibrate=False)
     real_agent = LeRobotRealAgent(real_robot)
 
     env_kwargs = dict(
@@ -429,7 +435,7 @@ def main(args: Args):
     print("\nLoading agent...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    agent = DeployAgent(sim_env, sample_obs=real_obs)
+    agent = DeployAgent(sim_env, sample_obs=real_obs, target_image_size=args.image_size, device=device)
 
     if args.checkpoint:
         seed_to_use = args.seed

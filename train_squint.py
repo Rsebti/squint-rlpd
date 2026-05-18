@@ -111,6 +111,14 @@ class Args:
     """the control mode to use for the environment"""
     action_smooth_coef: float = 0.0
     """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Disabled by default — the penalty creates a 'do nothing' attractor for from-scratch training. Enable (e.g. 0.05-0.2) only for fine-tuning a working policy if eval shows jitter."""
+    sim_freq: int = 100
+    """Physics substep rate (Hz). 100 = 10 ms/substep (default). 300 = 3.33 ms/substep (higher physics fidelity, ~3x slower sim)."""
+    control_freq: int = 10
+    """Control rate (Hz). Episode time per step = 1/control_freq. 7 s episode @ 10 Hz = 70 steps."""
+    camera_lag_substeps_min: int = 1
+    """Min per-env camera-lag substeps (inclusive). At sim_freq=100, 1 substep = 10 ms. Set both min/max to 0 to disable image lag."""
+    camera_lag_substeps_max: int = 5
+    """Max per-env camera-lag substeps (inclusive). At sim_freq=100, 5 substeps = 50 ms; at sim_freq=300, 15 substeps = 50 ms."""
     obs_mode: Optional[str] = "rgb"
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"
@@ -675,6 +683,17 @@ if __name__ == "__main__":
         eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
         env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
+    # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
+    env_kwargs["sim_freq"] = args.sim_freq
+    eval_env_kwargs["sim_freq"] = args.sim_freq
+    env_kwargs["control_freq"] = args.control_freq
+    eval_env_kwargs["control_freq"] = args.control_freq
+    # Camera-lag DR override: set both to 0 to disable image latency entirely.
+    lag_range = (args.camera_lag_substeps_min, args.camera_lag_substeps_max)
+    env_kwargs.setdefault("domain_randomization_config", {})
+    eval_env_kwargs.setdefault("domain_randomization_config", {})
+    env_kwargs["domain_randomization_config"]["camera_lag_substeps_range"] = lag_range
+    eval_env_kwargs["domain_randomization_config"]["camera_lag_substeps_range"] = lag_range
 
     _make_steps = args.eval_max_episode_steps if args.eval_max_episode_steps > 0 else None
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,

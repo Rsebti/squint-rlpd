@@ -229,14 +229,9 @@ class SO101(BaseAgent):
         ),
         start=Keyframe(
             qpos=np.array(
-                # Arm joints (pan, lift, elbow): measured real-robot servo angles.
-                # Wrist_flex / wrist_roll: tilt wrist down + roll camera between
-                # fingers so the landscape wrist view frames the workspace with
-                # the gripper at the top of the frame (matches the pre-21b56e0
-                # working sim camera framing).
-                [3.3 * np.pi / 180, -3.2 * np.pi / 180, -9.0 * np.pi / 180,
-                 np.pi / 2, -np.pi / 2, 49.7 * np.pi / 180]
-            ),
+                [-2.242 * np.pi / 180, -80.791 * np.pi / 180, 36.747 * np.pi / 180,
+                 86.901 * np.pi / 180, -82.154 * np.pi / 180, -14.686 * np.pi / 180]
+            ),  # Hand-set real-robot pose (servo deg from calibrated mid).
             pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
         ),
         zero=Keyframe(
