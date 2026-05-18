@@ -59,7 +59,12 @@ EP_STEPS=70
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-32}"
-IMAGE_WIDTH="${IMAGE_WIDTH:-42}"   # landscape, aspect-preserved
+IMAGE_WIDTH="${IMAGE_WIDTH:-42}"           # landscape, aspect-preserved
+# Sim render resolution. Default 128x168 (16:21, matches policy 32x42).
+# Memory ≈ 14× less than the train_squint.py default 480x640 — fits 6144
+# envs on RTX 6000 96 GB. Override only if you need higher-fidelity render.
+RENDER_HEIGHT="${RENDER_HEIGHT:-128}"
+RENDER_WIDTH="${RENDER_WIDTH:-168}"
 
 # RTX 6000 96 GB knobs (mirror brev_run_rtx6000_32x32.sh).
 NUM_ENVS="${NUM_ENVS:-6144}"
@@ -83,7 +88,8 @@ echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STE
 echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
 echo "  num_envs=$NUM_ENVS  num_eval_envs=$NUM_EVAL_ENVS  buffer=$BUFFER_SIZE"
-echo "  num_updates=$NUM_UPDATES  batch_size=$BATCH_SIZE  image=${IMAGE_HEIGHT}x${IMAGE_WIDTH}"
+echo "  num_updates=$NUM_UPDATES  batch_size=$BATCH_SIZE"
+echo "  image=${IMAGE_HEIGHT}x${IMAGE_WIDTH}   render=${RENDER_HEIGHT}x${RENDER_WIDTH}"
 echo "  group=$WANDB_GROUP"
 echo "================================================================"
 
@@ -106,6 +112,8 @@ python train_squint.py \
     --batch_size="$BATCH_SIZE" \
     --image_height="$IMAGE_HEIGHT" \
     --image_width="$IMAGE_WIDTH" \
+    --render_height="$RENDER_HEIGHT" \
+    --render_width="$RENDER_WIDTH" \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \
