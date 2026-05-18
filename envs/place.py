@@ -557,8 +557,12 @@ class Place(DefaultCameraEnv):
             # places the bowl floor on the table. The bowl wall height is
             # 2*bowl_half_z. The success criterion only uses bin_half_x/y.
             self.bin_thickness = 0.0  # bowl floor is at actor origin
-            bin_half_sizes_x = np.ones(self.num_envs) * self.bowl_half_x
-            bin_half_sizes_y = np.ones(self.num_envs) * self.bowl_half_y
+            # Success-check rectangle is tighter than the bowl AABB so a cube
+            # landing on the rim/outer wall does NOT count as success. 10x10 cm
+            # full → 5 cm half. self.bowl_half_* still hold the actual mesh
+            # extents for rendering / physics — don't reuse them here.
+            bin_half_sizes_x = np.ones(self.num_envs) * 0.05
+            bin_half_sizes_y = np.ones(self.num_envs) * 0.05
             bin_half_sizes_z = np.ones(self.num_envs) * self.bowl_half_z
             # Reward target z: at the bowl rim. Releasing the cube right at
             # rim height lets it drop straight down into the bowl center
@@ -1059,8 +1063,13 @@ class Place(DefaultCameraEnv):
                 self.goal_color_idx, num_classes=NUM_COLORS
             ).to(qpos.dtype)
         # Bowl centre in the robot base frame (xyz). Appended last so it lands
-        # at the end of the flattened state vector.
-        obs["bowl_xyz_robot_frame"] = (self.agent.robot.pose.inv() * self.bin.pose).p
+        # at the end of the flattened state vector. In real-deploy the real
+        # robot has no `.pose`; fall back to a fixed measured bowl position.
+        if hasattr(self.agent.robot, "pose") and hasattr(self, "bin"):
+            obs["bowl_xyz_robot_frame"] = (self.agent.robot.pose.inv() * self.bin.pose).p
+        else:
+            bowl_xyz = torch.tensor([0.20, 0.10, 0.00], dtype=qpos.dtype, device=qpos.device)
+            obs["bowl_xyz_robot_frame"] = bowl_xyz.unsqueeze(0).expand(qpos.shape[0], 3)
         return obs
 
     def _get_obs_extra(self, info: dict):
