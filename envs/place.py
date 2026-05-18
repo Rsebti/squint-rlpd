@@ -1238,7 +1238,10 @@ class Place(DefaultCameraEnv):
         #       closure bonus (≈ 0.5 × 0.2/2.27 ≈ 0.044) and the policy would
         #       avoid closing hard.
         # Coefficients exposed via __init__: strong_grasp_coef, gripper_hold_coef.
-        target_qpos = self.agent.controller._target_qpos
+        # SO101's controller is a CombinedController wrapping the actual
+        # PDJointPos controller under the 'arm' key, so _target_qpos lives one
+        # level deeper than on a plain controller.
+        target_qpos = self.agent.controller.controllers["arm"]._target_qpos
         target_grip = target_qpos[:, -1]
         target_closure = torch.clamp(
             (gripper_max - target_grip) / (gripper_max - gripper_min),
