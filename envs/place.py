@@ -1111,11 +1111,13 @@ class Place(DefaultCameraEnv):
         is_cube_above_table = item_pos[:, 2] > 0.04
         is_item_above_bin = inside_x & inside_y & is_cube_above_table
 
-        item_lifted = self.item.pose.p[..., -1] >= (self.item_half_sizes + 1e-3)
-
         item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
         is_item_static = item_vel <= 2e-2
         is_item_grasped = self.agent.is_grasping(self.item)
+        # Lifted requires both: cube z off the table AND gripper actually grasping.
+        # Without the grasp clause, a hand-tap that bounces the cube briefly off
+        # the table would count as a lift.
+        item_lifted = (self.item.pose.p[..., -1] >= (self.item_half_sizes + 1e-3)) & is_item_grasped
         is_robot_static = self.agent.is_static()
 
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
@@ -1155,27 +1157,39 @@ class Place(DefaultCameraEnv):
         goal_xyz = bin_pos.clone()
         goal_xyz[..., 2] = self.bin_thickness + self.item_half_sizes + self.target_z_above_floor
 
-        item_to_goal_dist = torch.linalg.norm(goal_xyz - item_pos, axis=1)
-        place_reward_final = 1 - torch.tanh(5.0 * item_to_goal_dist)
+        # Place reward (only used by the grasped-and-lifted branch below).
+        # Two components, both in [0,1], summed → [0, 2]:
+        #   place_reward_z  : encourages cube z to first reach travel altitude
+        #                     (above the rim). Once xy-close, the z target
+        #                     flips to the rim so the cube descends into the bowl.
+        #   place_reward_xy : only fires once the cube is above travel altitude
+        #                     OR already xy-close to the bowl. This prevents
+        #                     the policy from racing diagonally to (rim_xy, rim_z)
+        #                     by going up and over instead.
+        rim_z = goal_xyz[..., 2]
+        travel_z = rim_z + self.bin_dimensions[:, 2] * 2 + 0.03  # bowl rim + bowl_height + 3cm
 
         item_to_goal_dist_xy = torch.linalg.norm(goal_xyz[..., :2] - item_pos[..., :2], dim=1)
-        item_to_goal_dist_z_far = torch.linalg.norm(
-            (goal_xyz[..., 2:] + (self.bin_dimensions[:, 2:] * 2) + 0.03) - item_pos[..., 2:], dim=1
-        )
-        item_to_goal_dist_z_close = torch.linalg.norm(goal_xyz[..., 2:] - item_pos[..., 2:], dim=1)
         item_close_to_goal = (item_to_goal_dist_xy <= self.bin_radius)
-        item_to_goal_dist_z = torch.where(item_close_to_goal, item_to_goal_dist_z_close, item_to_goal_dist_z_far)
+
+        z_target = torch.where(item_close_to_goal, rim_z, travel_z)
+        item_to_goal_dist_z = torch.abs(item_pos[..., 2] - z_target)
         place_reward_z = 1 - torch.tanh(10.0 * item_to_goal_dist_z)
-        place_reward = place_reward_final + place_reward_z
+
+        above_travel = item_pos[..., 2] >= (travel_z - 0.02)  # within 2cm of travel altitude
+        xy_gate = (above_travel | item_close_to_goal).float()
+        place_reward_xy = xy_gate * (1 - torch.tanh(5.0 * item_to_goal_dist_xy))
+
+        place_reward = place_reward_z + place_reward_xy
 
         gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
         gripper_openness = (self.agent.robot.get_qpos()[:, -1] - gripper_min) / (gripper_max - gripper_min)
 
-        # Lift gate: only switch to the grasped-phase reward (3 + place_reward)
-        # once the cube is actually off the table. Without this, a policy that
-        # closes the gripper around the cube while it's still flush on the
-        # table earns the same +3 jump as one that lifts, and can collect most
-        # of place_reward by sliding the cube along the table toward the bowl.
+        # Grasp ladder:
+        #   grasped (any z)        → flat +2.5  — bridges 2.0 reaching to 3+place
+        #   grasped AND lifted     → +3 + place_reward  (the place phase)
+        # Later branches (above_bin, success) override these.
+        reward[info["is_item_grasped"]] = 2.5
         grasped_and_lifted = info["is_item_grasped"] & info["item_lifted"]
         reward[grasped_and_lifted] = (3 + place_reward)[grasped_and_lifted]
 
