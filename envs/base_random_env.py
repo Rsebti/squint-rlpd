@@ -1066,7 +1066,15 @@ class WristCameraEnv(BaseRandomEnv):
     """
 
     # Base pose relative to gripper_link.
-    WRIST_CAMERA_BASE_POS = (0.0001, 0.0498, -0.0691)  # x +5 mm (from original -0.0049) — shifts image content right so gripper sits to the left of frame, matching real wrist cam.
+    # NOTE: these translations are visual-calibration tweaks tuned at FOV=82°.
+    # Original mount values were (-0.0049, 0.0498, -0.0591). Two manual offsets
+    # were added to match the real arm's wrist-camera framing:
+    #   x: -0.0049 -> +0.0001 (+5 mm) — gripper sits at the LEFT of the image
+    #   z: -0.0591 -> -0.0691 (-10 mm) — slight forward push along optical axis
+    # If the measured real-camera FOV (coming tomorrow) differs from 82°,
+    # revisit these — the framing depends on both pose AND FOV. Revert to
+    # the originals if recalibrating from scratch.
+    WRIST_CAMERA_BASE_POS = (0.0001, 0.0498, -0.0691)
     WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-90), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
     WRIST_CAMERA_FOV = np.deg2rad(82)  # vertical FOV (SAPIEN fovy); at 640x480 → ~109° horizontal.
 
