@@ -60,11 +60,12 @@ ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-32}"
 IMAGE_WIDTH="${IMAGE_WIDTH:-42}"           # landscape, aspect-preserved
-# Sim render resolution. Default 128x168 (16:21, matches policy 32x42).
-# Memory ≈ 14× less than the train_squint.py default 480x640 — fits 6144
-# envs on RTX 6000 96 GB. Override only if you need higher-fidelity render.
-RENDER_HEIGHT="${RENDER_HEIGHT:-128}"
-RENDER_WIDTH="${RENDER_WIDTH:-168}"
+# Sim render resolution. Default 96x128 (3:4 landscape, longest side=128).
+# Memory ≈ 25× less than the train_squint.py default 480x640. Aspect 0.75
+# is within 2% of the policy input aspect (32x42 = 0.76). Both dims are
+# multiples of 8 for GPU alignment.
+RENDER_HEIGHT="${RENDER_HEIGHT:-96}"
+RENDER_WIDTH="${RENDER_WIDTH:-128}"
 
 # RTX 6000 96 GB knobs (mirror brev_run_rtx6000_32x32.sh).
 NUM_ENVS="${NUM_ENVS:-6144}"
