@@ -189,7 +189,14 @@ class ClockedRecordEpisode(RecordEpisode):
             if len(img) == 1:
                 img = img[0]
             else:
-                img = tile_images(img, nrows=self.video_nrows)
+                # Recompute nrows for the (capped) env count. RecordEpisode's
+                # self.video_nrows = sqrt(num_eval_envs) which is set for the
+                # FULL eval-envs count (e.g. 16 for 256 envs); applying that
+                # to a 30-env cap gives 16 rows × 2 cols = vertical strip.
+                # Use a near-square layout for the capped count instead.
+                n = len(img)
+                nrows = max(1, int(np.floor(np.sqrt(n))))
+                img = tile_images(img, nrows=nrows)
         return self._stamp_clock(img)
 
     def _stamp_clock(self, img: np.ndarray) -> np.ndarray:
