@@ -1008,14 +1008,20 @@ if __name__ == "__main__":
             if args.evaluate:
                 break
             if args.save_model:
-                torch.save({
+                ckpt_payload = {
                     'encoder': encoder.state_dict(),
                     'actor': actor.state_dict(),
                     'critic': critic_target.state_dict(),
                     'log_alpha': log_alpha,
                     'global_step': global_step,
-                }, model_path)
-                print(f"Step {global_step}: model checkpoint saved to {model_path}")
+                }
+                torch.save(ckpt_payload, model_path)
+                # Also save a per-eval snapshot so we keep training history,
+                # not just the latest. Filename has a 0-padded step suffix.
+                step_path = model_path.replace(
+                    "ckpt.pt", f"ckpt_step{global_step:09d}.pt")
+                torch.save(ckpt_payload, step_path)
+                print(f"Step {global_step}: ckpt saved to {model_path} and {step_path}")
 
         # Collect
         if global_step < args.learning_starts:
