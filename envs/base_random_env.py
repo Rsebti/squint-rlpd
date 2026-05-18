@@ -974,10 +974,20 @@ class BaseRandomEnv(BaseEnv):
     def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
         cfg = self.domain_randomization_config
         k_lo, k_hi = cfg.camera_lag_substeps_range
+        # Always run super() FIRST so update_render(update_sensors=True) fires
+        # at end-of-step and refreshes the GPU camera buffer. Otherwise
+        # visualization / get_sensor_images / video recording read a stale
+        # buffer (or freeze on the very first render). Then, for cached
+        # sensors, overwrite each modality with the substep-K cached tensor
+        # so the policy obs carries the intended image lag.
+        sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
         if k_hi > 0 and self._mid_step_sensor_cache:
-            sensor_obs = self._gather_per_env_substep_obs()
-        else:
-            sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
+            cached = self._gather_per_env_substep_obs()
+            for sensor_name, mods in cached.items():
+                if sensor_name in sensor_obs:
+                    sensor_obs[sensor_name].update(mods)
+                else:
+                    sensor_obs[sensor_name] = mods
         for name, data in sensor_obs.items():
             if not isinstance(data, dict) or "rgb" not in data:
                 continue
