@@ -58,7 +58,8 @@ EP_STEPS=70
 
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
-IMAGE_SIZE="${IMAGE_SIZE:-32}"
+IMAGE_HEIGHT="${IMAGE_HEIGHT:-32}"
+IMAGE_WIDTH="${IMAGE_WIDTH:-42}"   # landscape, aspect-preserved
 
 # RTX 6000 96 GB knobs (mirror brev_run_rtx6000_32x32.sh).
 NUM_ENVS="${NUM_ENVS:-6144}"
@@ -82,7 +83,7 @@ echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STE
 echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
 echo "  num_envs=$NUM_ENVS  num_eval_envs=$NUM_EVAL_ENVS  buffer=$BUFFER_SIZE"
-echo "  num_updates=$NUM_UPDATES  batch_size=$BATCH_SIZE  image_size=$IMAGE_SIZE"
+echo "  num_updates=$NUM_UPDATES  batch_size=$BATCH_SIZE  image=${IMAGE_HEIGHT}x${IMAGE_WIDTH}"
 echo "  group=$WANDB_GROUP"
 echo "================================================================"
 
@@ -103,7 +104,8 @@ python train_squint.py \
     --buffer_size="$BUFFER_SIZE" \
     --num_updates="$NUM_UPDATES" \
     --batch_size="$BATCH_SIZE" \
-    --image_size="$IMAGE_SIZE" \
+    --image_height="$IMAGE_HEIGHT" \
+    --image_width="$IMAGE_WIDTH" \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \
