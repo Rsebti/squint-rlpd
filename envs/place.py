@@ -1106,7 +1106,10 @@ class Place(DefaultCameraEnv):
         offset = item_pos - bin_pos
         inside_x = torch.abs(offset[:, 0]) < self.bin_half_sizes_x
         inside_y = torch.abs(offset[:, 1]) < self.bin_half_sizes_y
-        is_item_above_bin = inside_x & inside_y
+        # Cube must also be at least 4 cm above the table (z = 0) so a cube
+        # flush on the table can't trigger above_bin / success.
+        is_cube_above_table = item_pos[:, 2] > 0.04
+        is_item_above_bin = inside_x & inside_y & is_cube_above_table
 
         item_lifted = self.item.pose.p[..., -1] >= (self.item_half_sizes + 1e-3)
 
