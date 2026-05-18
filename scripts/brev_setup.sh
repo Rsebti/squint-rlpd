@@ -78,6 +78,39 @@ conda activate squint
 # were created from an older environment.yaml (before coacd was listed).
 python -c "import coacd" 2>/dev/null || pip install -q coacd
 
+# Blackwell (RTX Pro 6000 / B100 / B200) needs PyTorch built with CUDA 12.8
+# and kernels for sm_100 / sm_120. The stock environment.yaml ships cu126
+# wheels which are Hopper-only — they crash with
+#   "no kernel image is available for execution on the device"
+# on first CUDA op. We detect compute capability >= 10.0 (Blackwell) and
+# swap to torch 2.7.1+cu128 (lerobot-compatible, includes sm_100/sm_120).
+# Avoid `latest` because the cu128 index now serves torch 2.12 which:
+#  (a) breaks lerobot 0.4.3 (requires torch<2.8.0),
+#  (b) is paired with a torchaudio version mismatch on the index.
+NEED_BLACKWELL_TORCH=$(python - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch
+except Exception:
+    print("1"); sys.exit()
+if not torch.cuda.is_available():
+    print("0"); sys.exit()
+cap = torch.cuda.get_device_capability(0)
+arch_list = torch.cuda.get_arch_list()
+# Need swap if GPU is sm_100+ (Blackwell) AND torch wasn't built for it.
+need = cap[0] >= 10
+covered = any(s in arch_list for s in ("sm_100", "sm_120"))
+print("1" if (need and not covered) else "0")
+PY
+)
+if [ "$NEED_BLACKWELL_TORCH" = "1" ]; then
+  echo "  (Blackwell GPU detected, swapping torch to 2.7.1+cu128)"
+  pip uninstall -y -q torch torchvision torchaudio
+  pip install -q --index-url https://download.pytorch.org/whl/cu128 \
+    torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
+  python -c "import torch; assert torch.zeros(4, device='cuda').sum().item() == 0.0, 'CUDA op still fails after swap'; print('  Blackwell torch OK:', torch.__version__, torch.cuda.get_arch_list())"
+fi
+
 echo "==[4/4] wandb / HF login ====================================="
 if [ -z "${WANDB_API_KEY:-}" ]; then
   echo "ERROR: WANDB_API_KEY is required. Get it from https://wandb.ai/authorize" >&2
