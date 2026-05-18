@@ -28,12 +28,15 @@ from .robot.so101 import SO101
 # env.reset(options={"goal_color_idx": <int or 1-D tensor>}).
 COLOR_PALETTE = np.array(
     [
-        [231/255,  84/255,  62/255],  # 0 red
-        [ 40/255,  71/255, 136/255],  # 1 blue
-        [ 76/255, 117/255,  77/255],  # 2 green
-        [238/255, 195/255,  83/255],  # 3 yellow
-        [101/255,  67/255, 104/255],  # 4 purple
-        [235/255, 116/255,  79/255],  # 5 orange
+        # High-saturation dark palette (HSV-S ≥ 0.85, V ≈ 0.5–0.8).
+        # Replaces the earlier pastel set whose low-saturation greens and
+        # purples (S ≈ 0.35) read as "white was mixed in".
+        [180/255,  30/255,  30/255],  # 0 red    S=0.83 V=0.71
+        [ 10/255,  25/255, 140/255],  # 1 blue   S=0.93 V=0.55
+        [ 25/255,  95/255,  30/255],  # 2 green  S=0.74 V=0.37
+        [200/255, 170/255,  20/255],  # 3 yellow S=0.90 V=0.78
+        [100/255,  20/255, 120/255],  # 4 purple S=0.83 V=0.47
+        [200/255,  80/255,  20/255],  # 5 orange S=0.90 V=0.78
     ],
     dtype=np.float32,
 )
@@ -203,11 +206,11 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     """Half-range of per-episode multiplicative jitter on cube HSV saturation. ±10% by default."""
     item_value_jitter: float = 0.10
     """Half-range of per-episode multiplicative jitter on cube HSV value (brightness). ±10% by default."""
-    item_roughness_range: Sequence[float] = (0.35, 0.7)
+    item_roughness_range: Sequence[float] = (0.7, 0.95)  # was (0.35, 0.7) — more matte to match painted-wood look (kills specular highlights that read as "too light")
     """Per-episode cube material roughness (matte <-> slightly glossy)."""
     item_metallic_range: Sequence[float] = (0.0, 0.15)
     """Per-episode cube material metallic (kept low — painted wood is non-metallic)."""
-    item_specular_range: Sequence[float] = (0.3, 0.7)
+    item_specular_range: Sequence[float] = (0.1, 0.4)  # was (0.3, 0.7) — lower specular so the cubes don't catch bright highlights that wash out the base color
     """Per-episode cube material specular reflection strength."""
 
     # Per-episode DR on the bowl material. Bowl uses baked vertex colors;

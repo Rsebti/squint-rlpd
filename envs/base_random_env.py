@@ -116,11 +116,12 @@ class RandomizationConfig:
     """Point lights per sub-scene, at random positions above the workspace."""
     point_light_intensity_range: Sequence[float] = (0.0, 0.3)
     """Per-episode per-point-light intensity, before the exposure multiplier."""
-    item_emission_range: Sequence[float] = (0.05, 0.35)
+    item_emission_range: Sequence[float] = (0.0, 0.1)
     """Per-episode emissive glow on the task cubes, as a fraction of their base
-    color. A small self-lit component (domain-randomized) so the goal color
-    stays readable even in the dark tail of the brightness randomization.
-    0.0 = no glow (purely lit by scene lights)."""
+    color. Tightened from (0.05, 0.35) — the older range washed the base
+    colors out and made them look "too light". 0.0 = no glow (purely lit by
+    scene lights), 0.1 = barely-perceptible self-lit so the goal color stays
+    readable in the dark tail of the brightness randomization."""
 
     # === Third-person camera settings (only used by ThirdCameraEnv) ===
     third_camera_pos_noise: Sequence[float] = (0.025, 0.025, 0.025)
