@@ -1066,9 +1066,9 @@ class WristCameraEnv(BaseRandomEnv):
     """
 
     # Base pose relative to gripper_link.
-    WRIST_CAMERA_BASE_POS = (-0.0049, 0.0498, -0.0591)
+    WRIST_CAMERA_BASE_POS = (0.0001, 0.0498, -0.0691)  # x +5 mm (from original -0.0049) — shifts image content right so gripper sits to the left of frame, matching real wrist cam.
     WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-90), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
-    WRIST_CAMERA_FOV = np.deg2rad(71)  # 71 degrees
+    WRIST_CAMERA_FOV = np.deg2rad(82)  # vertical FOV (SAPIEN fovy); at 640x480 → ~109° horizontal.
 
     def __init__(
         self,

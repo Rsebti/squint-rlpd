@@ -95,6 +95,14 @@ def make_env(task: str, config: dict = CONFIG):
         human_render_camera_configs=render_camera_size,
         num_envs=config['num_envs'],
         domain_randomization=config['domain_randomization'],
+        # Zero the per-episode wrist-camera extrinsic jitter so what we see in
+        # the visualizer reflects the exact configured mount, with no DR
+        # offset shifting the framing each reset. Other DR (lighting, cube
+        # colours, frictions, image pipeline) is unaffected.
+        domain_randomization_config={
+            'wrist_camera_pos_noise': (0.0, 0.0, 0.0),
+            'wrist_camera_rot_noise': (0.0, 0.0, 0.0),
+        },
         reconfiguration_freq=None,
     )
 
