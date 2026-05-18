@@ -16,34 +16,36 @@ from mani_skill.utils.wrappers.record import RecordEpisode
 # ---------------------------  Wrappers --------------------------------------#
 
 class DownsampleObsWrapper(gym.ObservationWrapper):
-    """Downsamples RGB observations from render_size to target_size using area interpolation.
+    """Downsamples RGB observations from render size to target size using area interpolation.
 
+    `target_size` may be an int (square output HxH) or a tuple (H, W).
     Expects input in (B, H, W, C) format.
     """
     def __init__(self, env, target_size):
         super().__init__(env)
-        self.target_size = target_size
-        # Update observation space 
+        # Normalize to (H, W) tuple.
+        if isinstance(target_size, int):
+            self.target_h, self.target_w = target_size, target_size
+        else:
+            self.target_h, self.target_w = int(target_size[0]), int(target_size[1])
+        self.target_size = (self.target_h, self.target_w)
         old_rgb_space = self.observation_space['rgb']
         C = old_rgb_space.shape[-1]
         self.observation_space['rgb'] = gym.spaces.Box(
-            low=0, high=255, shape=(target_size, target_size, C), dtype=old_rgb_space.dtype
+            low=0, high=255, shape=(self.target_h, self.target_w, C), dtype=old_rgb_space.dtype
         )
 
     def observation(self, obs):
         rgb = obs['rgb']  # (B, H, W, C) or (H, W, C)
-        if rgb.shape[-2] == self.target_size:
+        if rgb.shape[-3] == self.target_h and rgb.shape[-2] == self.target_w:
             return obs  # Already at target size
 
-        # Handle batched and unbatched cases
         squeeze = rgb.dim() == 3
         if squeeze:
             rgb = rgb.unsqueeze(0)
 
-        # (B, H, W, C) -> (B, C, H, W) for interpolate
         rgb = rgb.permute(0, 3, 1, 2)
-        rgb = F.interpolate(rgb.float(), size=(self.target_size, self.target_size), mode='area').to(torch.uint8)
-        # (B, C, H, W) -> (B, H, W, C)
+        rgb = F.interpolate(rgb.float(), size=(self.target_h, self.target_w), mode='area').to(torch.uint8)
         rgb = rgb.permute(0, 2, 3, 1)
 
         if squeeze:

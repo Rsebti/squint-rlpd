@@ -63,7 +63,7 @@ def main():
         sim_backend="gpu",
         domain_randomization=not args.no_dr,
         control_mode="pd_joint_target_delta_pos",
-        sensor_configs=dict(width=128, height=128),
+        sensor_configs=dict(width=640, height=480),
         human_render_camera_configs=dict(
             shader_pack="default", width=args.render_size, height=args.render_size
         ),
@@ -78,7 +78,7 @@ def main():
     obs_space = env.unwrapped.single_observation_space
     n_state = obs_space["state"].shape[0]
     n_act = env.unwrapped.single_action_space.shape[0]
-    encoder = CNNEncoder(n_obs=(16, 16, 3), device=device).to(device)
+    encoder = CNNEncoder(n_obs=(32, 42, 3), device=device).to(device)
     actor = Actor(env, n_obs=encoder.repr_dim, n_state=n_state, n_act=n_act, device=device).to(device)
     encoder.load_state_dict(ckpt["encoder"])
     actor.load_state_dict(ckpt["actor"])
@@ -120,7 +120,7 @@ def main():
             if not torch.is_tensor(state_now):
                 state_now = torch.from_numpy(state_now)
             rgb_t = rgb_now.permute(0, 3, 1, 2).float()
-            rgb16 = F.interpolate(rgb_t, size=(16, 16), mode='area').permute(0, 2, 3, 1).to(torch.uint8)
+            rgb16 = F.interpolate(rgb_t, size=(32, 42), mode='area').permute(0, 2, 3, 1).to(torch.uint8)
             with torch.no_grad():
                 feats = encoder(rgb16.to(device))
                 mean = actor.forward(feats, state_now.float().to(device))

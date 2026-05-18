@@ -1092,8 +1092,8 @@ class WristCameraEnv(BaseRandomEnv):
             CameraConfig(
                 "base_camera",
                 pose=sapien.Pose(),
-                width=128,
-                height=128,
+                width=640,
+                height=480,
                 fov=self.WRIST_CAMERA_FOV + fov_noise,
                 near=0.01,
                 far=100,

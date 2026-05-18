@@ -92,8 +92,8 @@ CALIBRATION_ID = "so101_follower_arm"     # filename (no extension) of your cali
 CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .json
 
 # ── Contract constants (must match the training env) ───────────────────────
-IMAGE_SIZE = 16          # CNN input H=W
-SIM_CAM_SIZE = 128       # sim wrist-camera resolution (intermediate resize)
+IMAGE_H = 32             # CNN input height (landscape, matches sim wrist cam 4:3)
+IMAGE_W = 42             # CNN input width  (≈ 32 * 4/3, preserves 4:3 aspect)
 N_COLORS = 6             # goal-color one-hot length
 CONTROL_HZ = 30          # sim sim_freq=300 / control_freq=30 (matches training)
 
@@ -190,25 +190,32 @@ class RealRobotAgent:
 # �═══════════════════════════════════════════════════════════════════════════╗
 # ║  Policy network — architecture must match the checkpoint exactly          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
+# For 32×42 input the CNN flatten is 64 * 4 * 7 = 1792 (see padding math in
+# train_squint.py CNNEncoder, height==32 branch).
+CNN_FLATTEN_DIM = 1792
+RGB_PROJ_DIM = 75
+
+
 class CNNEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(3, 32, 4, stride=2), nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=1), nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1), nn.ReLU(),
             nn.Flatten(),
         )
 
-    def forward(self, rgb_uint8):           # (B, 16, 16, 3) uint8
+    def forward(self, rgb_uint8):           # (B, IMAGE_H, IMAGE_W, 3) uint8
         x = rgb_uint8.permute(0, 3, 1, 2).float()
         x = x / 255.0 - 0.5
-        return self.conv(x)                 # (B, 1024)
+        return self.conv(x)                 # (B, CNN_FLATTEN_DIM)
 
 
 class Projection(nn.Module):
     def __init__(self, n_state):
         super().__init__()
-        self.rgb_proj = nn.Sequential(nn.Linear(1024, 50), nn.LayerNorm(50), nn.Tanh())
+        self.rgb_proj = nn.Sequential(nn.Linear(CNN_FLATTEN_DIM, RGB_PROJ_DIM), nn.LayerNorm(RGB_PROJ_DIM), nn.Tanh())
         self.state_proj = nn.Sequential(nn.Linear(n_state, 256), nn.LayerNorm(256), nn.ReLU())
 
     def forward(self, rgb_feat, state):
@@ -220,7 +227,7 @@ class Actor(nn.Module):
         super().__init__()
         self.proj = Projection(n_state)
         self.fc = nn.Sequential(
-            nn.Linear(306, 256), nn.LayerNorm(256), nn.ReLU(),
+            nn.Linear(RGB_PROJ_DIM + 256, 256), nn.LayerNorm(256), nn.ReLU(),
             nn.Linear(256, 256), nn.LayerNorm(256), nn.ReLU(),
             nn.Linear(256, 256), nn.LayerNorm(256), nn.ReLU(),
         )
@@ -236,17 +243,14 @@ class Actor(nn.Module):
 
 # ── Observation / action helpers ────────────────────────────────────────────
 def preprocess_image(rgb):
-    """Real camera frame (1,H,W,3) uint8 → (1,16,16,3) uint8 tensor.
+    """Real camera frame (1,H,W,3) uint8 → (1, IMAGE_H, IMAGE_W, 3) uint8 tensor.
 
-    Center-crop to square, resize to the 128px sim resolution, area-downsample
-    to the 16px CNN input — same two-step path used during training.
+    Real wrist cam delivers 640×480 (landscape), sim renders 640×480 too, both
+    are area-downsampled to (IMAGE_H, IMAGE_W) = (32, 42). No center-crop —
+    the 4:3 aspect is preserved end-to-end.
     """
     img = rgb[0].cpu().numpy() if torch.is_tensor(rgb) else np.asarray(rgb[0])
-    h, w = img.shape[:2]
-    c = min(h, w)
-    img = img[(h - c) // 2:(h - c) // 2 + c, (w - c) // 2:(w - c) // 2 + c]
-    img = cv2.resize(img, (SIM_CAM_SIZE, SIM_CAM_SIZE), interpolation=cv2.INTER_AREA)
-    img = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+    img = cv2.resize(img, (IMAGE_W, IMAGE_H), interpolation=cv2.INTER_AREA)
     return torch.from_numpy(img).unsqueeze(0).to(torch.uint8)
 
 

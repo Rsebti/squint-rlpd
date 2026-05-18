@@ -115,10 +115,14 @@ class Args:
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"
     """the rendering mode of the environment, could be rgb or all"""
-    render_size: int = 128
-    """square size to render from env (HxW) - before downsampling"""
-    image_size: int = 16
-    """square size of the input image for actor (HxW) - after downsampling"""
+    render_height: int = 480
+    """sim wrist-camera render height (before downsampling)"""
+    render_width: int = 640
+    """sim wrist-camera render width (before downsampling)"""
+    image_height: int = 32
+    """policy-input image height (after downsampling)"""
+    image_width: int = 42
+    """policy-input image width (after downsampling). 42 ≈ 32 * 4/3, preserves landscape aspect."""
     apply_jitter: bool = True
     """applies color jitter to all input RGB observations (better for sim2real)"""
 
@@ -282,36 +286,45 @@ def weight_init(m):
 class CNNEncoder(nn.Module):
     def __init__(self, n_obs, device=None):
         super().__init__()
-        assert len(n_obs) == 3 and n_obs[0] == n_obs[1]
+        # n_obs is (H, W, C). Non-square inputs (e.g. 32x42 for the landscape
+        # wrist camera) are supported; the height is used as the dispatch key
+        # to pick a stride profile, then the resulting repr_dim is measured
+        # via a dummy forward so the projection layer can size to fit.
+        assert len(n_obs) == 3
         self.num_channels = n_obs[2]
-        self.image_size = n_obs[0]
-        self.repr_dim = 1024
+        H, W = int(n_obs[0]), int(n_obs[1])
+        self.image_size = H
 
-        if self.image_size == 64:
+        if H == 64:
             self.conv = nn.Sequential(
                 nn.Conv2d(self.num_channels, 32, 8, stride=4, device=device), nn.ReLU(),
                 nn.Conv2d(32, 64, 4, stride=2, device=device), nn.ReLU(),
                 nn.Conv2d(64, 64, 3, stride=1, device=device), nn.ReLU(),
                 nn.Flatten()
             )
-        elif self.image_size == 32:
+        elif H == 32:
             self.conv = nn.Sequential(
                 nn.Conv2d(self.num_channels, 32, 4, stride=2, device=device), nn.ReLU(),
                 nn.Conv2d(32, 64, 4, stride=2, device=device), nn.ReLU(),
                 nn.Conv2d(64, 64, 3, stride=1, device=device), nn.ReLU(),
                 nn.Flatten()
             )
-        elif self.image_size == 16:
+        elif H == 16:
             self.conv = nn.Sequential(
                 nn.Conv2d(self.num_channels, 32, 4, stride=2, device=device), nn.ReLU(),
                 nn.Conv2d(32, 64, 4, stride=1, device=device), nn.ReLU(),
                 nn.Flatten()
             )
         else:
-            raise ValueError(f"No CNN encoder supported for image size: {self.image_size}")
+            raise ValueError(f"No CNN encoder supported for image height: {H}")
 
         self.apply(weight_init)
         self.conv = self.conv.to(memory_format=torch.channels_last)
+        # Measure flatten size for the given (H, W).
+        with torch.no_grad():
+            dummy = torch.zeros(1, self.num_channels, H, W, device=device)
+            dummy = dummy.contiguous(memory_format=torch.channels_last)
+            self.repr_dim = int(self.conv(dummy).shape[-1])
 
     def forward(self, obs):
         obs = obs.permute(0, 3, 1, 2)
@@ -323,9 +336,11 @@ class CNNEncoder(nn.Module):
 class Projection(nn.Module):
     def __init__(self, n_obs, n_state, device=None):
         super().__init__()
-        self.repr_dim = 50 + 256
+        # rgb_proj output bumped from 50 to 75 since the input resolution went
+        # from 16x16 to 32x42 — more pixels, slightly more capacity to compress.
+        self.repr_dim = 75 + 256
         self.rgb_proj = nn.Sequential(
-            nn.Linear(n_obs, 50, device=device), nn.LayerNorm(50, device=device), nn.Tanh(),
+            nn.Linear(n_obs, 75, device=device), nn.LayerNorm(75, device=device), nn.Tanh(),
         )
         self.state_proj = nn.Sequential(
             nn.Linear(n_state, 256, device=device), nn.LayerNorm(256, device=device), nn.ReLU(),
@@ -516,15 +531,20 @@ class Critic(nn.Module):
 class DeployAgent(nn.Module):
     """Standalone deployment wrapper for deploy.py file. Handles downsampling and inference."""
 
-    def __init__(self, sim_env, sample_obs, target_image_size=16, device=None):
+    def __init__(self, sim_env, sample_obs, target_image_size=(32, 42), device=None):
         super().__init__()
         self.device = device
-        self.target_image_size = target_image_size
+        # Accept int (square) or (H, W).
+        if isinstance(target_image_size, int):
+            self.target_h, self.target_w = target_image_size, target_image_size
+        else:
+            self.target_h, self.target_w = int(target_image_size[0]), int(target_image_size[1])
+        self.target_image_size = (self.target_h, self.target_w)
 
         n_act = np.prod(sim_env.unwrapped.single_action_space.shape)
         n_obs_shape = sample_obs['rgb'].shape
         c = n_obs_shape[3] if len(n_obs_shape) == 4 else n_obs_shape[2]
-        n_obs = (target_image_size, target_image_size, c)
+        n_obs = (self.target_h, self.target_w, c)
         n_state = np.prod(sample_obs['state'].shape[1:]) if len(sample_obs['state'].shape) > 1 else sample_obs['state'].shape[0]
 
         self.encoder = CNNEncoder(n_obs, device)
@@ -546,13 +566,13 @@ class DeployAgent(nn.Module):
         print(f"Loaded checkpoint from {checkpoint} at step {ckpt['global_step']}")
 
     def downsample_rgb(self, rgb):
-        if rgb.shape[-3] == self.target_image_size:
+        if rgb.shape[-3] == self.target_h and rgb.shape[-2] == self.target_w:
             return rgb
         squeeze = rgb.dim() == 3
         if squeeze:
             rgb = rgb.unsqueeze(0)
         rgb = rgb.permute(0, 3, 1, 2).float()
-        rgb = F.interpolate(rgb, size=(self.target_image_size, self.target_image_size), mode='area')
+        rgb = F.interpolate(rgb, size=(self.target_h, self.target_w), mode='area')
         rgb = rgb.permute(0, 2, 3, 1).to(torch.uint8)
         if squeeze:
             rgb = rgb.squeeze(0)
@@ -638,10 +658,10 @@ if __name__ == "__main__":
 
     # ── Environment setup ──────────────────────────────────────────────────
     env_kwargs = dict(obs_mode=args.obs_mode, render_mode=args.render_mode, sim_backend="gpu",
-                      sensor_configs=dict(width=args.render_size, height=args.render_size))
+                      sensor_configs=dict(width=args.render_width, height=args.render_height))
     eval_env_kwargs = dict(obs_mode=args.obs_mode, render_mode=args.render_mode, sim_backend="gpu",
-                           sensor_configs=dict(width=args.render_size, height=args.render_size),
-                           human_render_camera_configs=dict(shader_pack="default", width=args.render_size, height=args.render_size))
+                           sensor_configs=dict(width=args.render_width, height=args.render_height),
+                           human_render_camera_configs=dict(shader_pack="default", width=args.render_width, height=args.render_height))
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
         eval_env_kwargs["control_mode"] = args.control_mode
@@ -670,9 +690,9 @@ if __name__ == "__main__":
     envs = FlattenRGBDObservationWrapper(envs, rgb=True, depth=False, state=True)
     eval_envs = FlattenRGBDObservationWrapper(eval_envs, rgb=True, depth=False, state=True)
 
-    if args.render_size != args.image_size:
-        envs = utils.DownsampleObsWrapper(envs, target_size=args.image_size)
-        eval_envs = utils.DownsampleObsWrapper(eval_envs, target_size=args.image_size)
+    if (args.render_height, args.render_width) != (args.image_height, args.image_width):
+        envs = utils.DownsampleObsWrapper(envs, target_size=(args.image_height, args.image_width))
+        eval_envs = utils.DownsampleObsWrapper(eval_envs, target_size=(args.image_height, args.image_width))
     if args.apply_jitter:
         envs = utils.ColorJitterWrapper(envs)
         eval_envs = utils.ColorJitterWrapper(eval_envs)
@@ -702,7 +722,7 @@ if __name__ == "__main__":
 
     n_act = math.prod(envs.unwrapped.single_action_space.shape)
     n_channels = envs.unwrapped.single_observation_space['rgb'].shape[2]
-    n_obs = (args.image_size, args.image_size, n_channels)
+    n_obs = (args.image_height, args.image_width, n_channels)
     n_state = math.prod(envs.unwrapped.single_observation_space['state'].shape)
     assert isinstance(envs.unwrapped.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
