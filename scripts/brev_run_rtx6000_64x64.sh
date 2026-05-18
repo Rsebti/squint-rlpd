@@ -20,14 +20,22 @@ export BUFFER_SIZE="${BUFFER_SIZE:-2000000}" # 2M transitions ~50 GB at 64x64 ui
 export NUM_UPDATES="${NUM_UPDATES:-256}"     # Same as 32x32; encoder is heavier so don't pile on
 export BATCH_SIZE="${BATCH_SIZE:-1024}"      # Wider batch absorbs GPU idle headroom; Blackwell-friendly
 
-EXP_NAME="${EXP_NAME:-eval1_rtx6000_64x64}"
-SEED="${SEED:-1}"
 N_DISTRACTORS="${N_DISTRACTORS:-1}"
+# Curriculum-stage naming: n=0 → eval1, n=1 → eval2, n=3 → eval3.
+case "$N_DISTRACTORS" in
+  0) STAGE=eval1 ;;
+  1) STAGE=eval2 ;;
+  3) STAGE=eval3 ;;
+  *) STAGE="eval_n${N_DISTRACTORS}" ;;
+esac
+
+EXP_NAME="${EXP_NAME:-${STAGE}_rtx6000_64x64}"
+SEED="${SEED:-1}"
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 EP_STEPS="${EP_STEPS:-75}"
 WANDB_PROJECT="${WANDB_PROJECT:-maniskill-so101}"
-WANDB_GROUP="${WANDB_GROUP:-SQUINT-RTX6000-64x64-$(date +%Y%m%d-%H%M)}"
+WANDB_GROUP="${WANDB_GROUP:-SQUINT-RTX6000-64x64-${STAGE}-$(date +%Y%m%d-%H%M)}"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate squint

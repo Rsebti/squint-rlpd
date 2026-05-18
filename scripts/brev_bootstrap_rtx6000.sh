@@ -26,9 +26,17 @@ set -euo pipefail
 # ── Hardcoded credentials & training defaults (override via env vars) ───────
 export WANDB_API_KEY="${WANDB_API_KEY:-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}"
 export N_DISTRACTORS="${N_DISTRACTORS:-0}"
-export EXP_NAME="${EXP_NAME:-eval1_rtx6000_32x32_n0}"
+# Stage convention: n=0 → eval1, n=1 → eval2, n=3 → eval3. Derived if not
+# explicitly set so the saved runs/, wandb groups, and ckpts all line up.
+case "$N_DISTRACTORS" in
+  0) _STAGE=eval1 ;;
+  1) _STAGE=eval2 ;;
+  3) _STAGE=eval3 ;;
+  *) _STAGE="eval_n${N_DISTRACTORS}" ;;
+esac
+export EXP_NAME="${EXP_NAME:-${_STAGE}_rtx6000_32x32}"
 export TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
-export WANDB_GROUP="${WANDB_GROUP:-SQUINT-RTX6000-32x32-n0-$(date +%Y%m%d-%H%M)}"
+export WANDB_GROUP="${WANDB_GROUP:-SQUINT-RTX6000-32x32-${_STAGE}-$(date +%Y%m%d-%H%M)}"
 
 REPO_DIR="$HOME/squint"
 SQUINT_REMOTE="https://github.com/fedecomi04/squint.git"
