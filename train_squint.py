@@ -253,6 +253,7 @@ def evaluate(args, eval_envs, get_action_fn, logger, eval_output_dir, max_episod
 
     logger.total_eval_time += eval_time
     logger.log(d=eval_d, step=global_step)
+    return eval_d
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +624,8 @@ if __name__ == "__main__":
     else:
         run_name = args.exp_name
     model_path = os.path.abspath(f"runs/{run_name}/ckpt.pt")
+    best_model_path = os.path.abspath(f"runs/{run_name}/ckpt_best.pt")
+    best_success_at_end = -1.0  # tracks the high-water mark for success_at_end
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
     # Seeding
@@ -1003,8 +1006,8 @@ if __name__ == "__main__":
     for iteration in range(args.num_total_iterations + 2):  # +2 for final eval
         # Evaluate
         if args.eval_freq > 0 and ((global_step - args.num_envs) // args.eval_freq) < (global_step // args.eval_freq):
-            evaluate(args, eval_envs, get_eval_action, logger, eval_output_dir,
-                     max_episode_steps, global_step, pbar)
+            eval_d = evaluate(args, eval_envs, get_eval_action, logger, eval_output_dir,
+                              max_episode_steps, global_step, pbar)
             if args.evaluate:
                 break
             if args.save_model:
@@ -1016,12 +1019,20 @@ if __name__ == "__main__":
                     'global_step': global_step,
                 }
                 torch.save(ckpt_payload, model_path)
-                # Also save a per-eval snapshot so we keep training history,
-                # not just the latest. Filename has a 0-padded step suffix.
+                # Per-eval history (one file per eval, never overwritten).
                 step_path = model_path.replace(
                     "ckpt.pt", f"ckpt_step{global_step:09d}.pt")
                 torch.save(ckpt_payload, step_path)
-                print(f"Step {global_step}: ckpt saved to {model_path} and {step_path}")
+                # Best-by-success_at_end (overwrites itself on new highs).
+                # SAC commonly collapses after a peak; this lets you recover the
+                # peak policy without manually scanning per-eval snapshots.
+                cur_success = float(eval_d.get('eval/success_at_end', -1.0))
+                msg_extra = ""
+                if cur_success > best_success_at_end:
+                    best_success_at_end = cur_success
+                    torch.save(ckpt_payload, best_model_path)
+                    msg_extra = f"  (NEW BEST success_at_end={cur_success:.3f})"
+                print(f"Step {global_step}: ckpt saved to {model_path} and {step_path}{msg_extra}")
 
         # Collect
         if global_step < args.learning_starts:
