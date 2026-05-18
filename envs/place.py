@@ -1168,7 +1168,13 @@ class Place(DefaultCameraEnv):
         gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
         gripper_openness = (self.agent.robot.get_qpos()[:, -1] - gripper_min) / (gripper_max - gripper_min)
 
-        reward[info["is_item_grasped"]] = (3 + place_reward)[info["is_item_grasped"]]
+        # Lift gate: only switch to the grasped-phase reward (3 + place_reward)
+        # once the cube is actually off the table. Without this, a policy that
+        # closes the gripper around the cube while it's still flush on the
+        # table earns the same +3 jump as one that lifts, and can collect most
+        # of place_reward by sliding the cube along the table toward the bowl.
+        grasped_and_lifted = info["is_item_grasped"] & info["item_lifted"]
+        reward[grasped_and_lifted] = (3 + place_reward)[grasped_and_lifted]
 
         is_item_dropped = (~info["robot_touching_item"]).float()
         robot_v = torch.linalg.norm(self.agent.robot.get_qvel()[:, :-1], axis=1)
