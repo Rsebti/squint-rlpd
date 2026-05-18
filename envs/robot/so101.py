@@ -229,8 +229,9 @@ class SO101(BaseAgent):
         ),
         start=Keyframe(
             qpos=np.array(
-                [0, 0, 0, np.pi / 2, -np.pi / 2, 60 * np.pi / 180] # sligtly open gripper
-            ),  # Cam up, fully open gripper
+                [3.3 * np.pi / 180, -3.2 * np.pi / 180, -9.0 * np.pi / 180,
+                 4.4 * np.pi / 180, -3.0 * np.pi / 180, 49.7 * np.pi / 180]
+            ),  # Measured real-robot servo angles (deg from calibrated mid).
             pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
         ),
         zero=Keyframe(

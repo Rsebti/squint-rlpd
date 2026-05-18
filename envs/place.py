@@ -160,7 +160,7 @@ class FlatTableSceneBuilder(TableSceneBuilder):
 class PlaceRandomizationConfig(DefaultRandomizationConfig):
     """Domain randomization config for Place task, extending wrist camera randomization."""
     # Noisy joint positions for better sim2real
-    robot_qpos_noise_std: float = np.deg2rad(5)
+    robot_qpos_noise_std: float = np.deg2rad(2)
     # Cube-specific randomization
     cube_half_size_range: Sequence[float] = (0.018 / 2, 0.022 / 2)
     # Can-specific randomization
