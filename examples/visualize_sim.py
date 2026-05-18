@@ -37,13 +37,22 @@ CONFIG = {
     ],
 
     # Environment settings
-    'num_envs': 16,
+    'num_envs': 4,
     'seed': 1,
-    'obs_mode': 'rgb+segmentation', # For Wrist Camera View
+    'obs_mode': 'rgb',  # No segmentation — wrist camera RGB only.
     'render_mode': 'rgb_array',
-    'image_size': 128,
+    # True wrist-camera resolution (matches the real lerobot Cv2Camera setup
+    # and the in-env sensor default in base_random_env.py: 640x480 landscape).
+    'sensor_width': 640,
+    'sensor_height': 480,
+    # Third-person human render camera shares the same 4:3 landscape so the
+    # side-by-side tile cells stay aspect-matched.
+    'render_camera_width': 640,
+    'render_camera_height': 480,
     'color_jitter': False,
-    'downsample_size': 128,
+    # None = no obs downsampling. Show the wrist obs at native sensor res so
+    # the displayed quality matches the real camera's quality.
+    'downsample_size': None,
     'control_mode': None,
     'domain_randomization': True,
 
@@ -58,16 +67,32 @@ CONFIG = {
 # Environment Factory
 # =============================================================================
 
+def _fit_to_window(img: np.ndarray, max_h: int, max_w: int) -> np.ndarray:
+    """Resize an image so its longer relative dimension hits the matching cap,
+    preserving the source aspect ratio. Avoids the portrait↔landscape squash
+    that cv2.resize to a fixed (w, h) tuple causes."""
+    h, w = img.shape[:2]
+    scale = min(max_h / h, max_w / w, 1.0) if h and w else 1.0
+    new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    if (new_w, new_h) != (w, h):
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return img
+
+
 def make_env(task: str, config: dict = CONFIG):
     """Create a ManiSkill environment with the given configuration."""
 
-    sensor_size = {'width': config['image_size'], 'height': config['image_size']}
+    sensor_size = {'width': config['sensor_width'], 'height': config['sensor_height']}
+    render_camera_size = {
+        'width': config['render_camera_width'],
+        'height': config['render_camera_height'],
+    }
 
     env_kwargs = dict(
         obs_mode=config['obs_mode'],
         render_mode=config['render_mode'],
         sensor_configs=sensor_size,
-        human_render_camera_configs=sensor_size,
+        human_render_camera_configs=render_camera_size,
         num_envs=config['num_envs'],
         domain_randomization=config['domain_randomization'],
         reconfiguration_freq=None,
@@ -110,6 +135,14 @@ def visualize_tasks(config: dict = CONFIG):
         num_envs = config['num_envs']
         video_nrows = int(np.sqrt(num_envs))
 
+        # Print the dimensions the user actually sees so portrait vs landscape
+        # is unambiguous (window resizing preserves aspect — see _fit_to_window).
+        if isinstance(obs, dict) and 'rgb' in obs:
+            o = obs['rgb']
+            print(f"  obs rgb shape: {tuple(o.shape)}  (N, H, W, C)")
+        print(f"  sensor: {config['sensor_width']}w x {config['sensor_height']}h"
+              f"  ({'portrait' if config['sensor_height'] > config['sensor_width'] else 'landscape'})")
+
         print(f"Running: {task}")
 
         for step in range(steps_per_task):
@@ -146,11 +179,13 @@ def visualize_tasks(config: dict = CONFIG):
                 # Interleave: concatenate obs and render for each env, then tile
                 paired = torch.cat([obs_rgb, render_rgb], dim=2)
                 rgb = tile_images(paired, nrows=video_nrows).cpu().numpy().astype(np.uint8)
-                rgb = cv2.resize(rgb, dsize=(window_size * 2, window_size))
+                # Scale to display while preserving aspect (so portrait stays
+                # portrait and landscape stays landscape on screen).
+                rgb = _fit_to_window(rgb, max_h=window_size * 2, max_w=window_size * 4)
             else:
                 # State mode: only show render view
                 rgb = tile_images(render_rgb, nrows=video_nrows).cpu().numpy().astype(np.uint8)
-                rgb = cv2.resize(rgb, dsize=(window_size, window_size))
+                rgb = _fit_to_window(rgb, max_h=window_size, max_w=window_size * 2)
 
             # Display
             rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
