@@ -1067,11 +1067,21 @@ if __name__ == "__main__":
                 # peak policy without manually scanning per-eval snapshots.
                 cur_success = float(eval_d.get('eval/success_at_end', -1.0))
                 msg_extra = ""
-                if cur_success > best_success_at_end:
+                new_best = cur_success > best_success_at_end
+                if new_best:
                     best_success_at_end = cur_success
                     torch.save(ckpt_payload, best_model_path)
                     msg_extra = f"  (NEW BEST success_at_end={cur_success:.3f})"
                 print(f"Step {global_step}: ckpt saved to {model_path} and {step_path}{msg_extra}")
+                # Crash-safety: push the latest ckpt to wandb every eval (not
+                # just at training end). Same artifact name → wandb versions
+                # it (v0, v1, ... :latest) without exploding storage. Best
+                # ckpt is uploaded under a separate name when it changes.
+                if args.track:
+                    base = f"model_{args.agent_name}_{args.env_id}_{args.seed}"
+                    logger.upload_checkpoint(model_path=model_path, model_name=base)
+                    if new_best and os.path.exists(best_model_path):
+                        logger.upload_checkpoint(model_path=best_model_path, model_name=f"{base}_best")
 
         # Collect
         if global_step < args.learning_starts:
@@ -1159,13 +1169,18 @@ if __name__ == "__main__":
         pbar.update(args.num_envs)
         global_step += args.num_envs
 
-    # Upload final checkpoint to wandb
+    # Upload final checkpoint(s) to wandb. Best ckpt goes under a separate
+    # artifact name so deploy.py can target either the final or peak policy.
     if args.save_model:
+        base = f"model_{args.agent_name}_{args.env_id}_{args.seed}"
         if os.path.exists(model_path):
-            model_name = f"model_{args.agent_name}_{args.env_id}_{args.seed}"
-            logger.upload_checkpoint(model_path=model_path, model_name=model_name)
+            logger.upload_checkpoint(model_path=model_path, model_name=base)
         else:
             print(f"WARNING: Checkpoint file not found at {model_path}, skipping upload")
+        if os.path.exists(best_model_path):
+            logger.upload_checkpoint(model_path=best_model_path, model_name=f"{base}_best")
+        else:
+            print(f"WARNING: Best checkpoint not found at {best_model_path}, skipping upload")
 
     print("Finishing logger...")
     logger.close()
