@@ -35,7 +35,7 @@ from sapien.render import RenderBodyComponent
 
 import mani_skill.envs.utils.randomization as randomization
 from mani_skill.envs.sapien_env import BaseEnv
-from mani_skill.sensors.camera import CameraConfig
+from mani_skill.sensors.camera import Camera, CameraConfig
 from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.link import Link
@@ -146,12 +146,25 @@ class RandomizationConfig:
     """If True, additionally jitter wrist-camera roll over the discrete set {0°, 90°, 180°, 270°} per episode. Use for a robustness-phase curriculum: trains the policy to handle a misoriented wrist camera. Continuous roll noise (wrist_camera_rot_noise[0]) is applied on top of the discrete choice."""
 
     # === Observation latency (camera lag) ===
-    # At 10 Hz, 1 step = 100 ms. Closest discrete approximation of the
-    # measured 49 ms camera lag (over-models by ~50 ms).
-    obs_delay_steps_range: Sequence[int] = (1, 1)
-    """Inclusive integer range for per-env observation (RGB) delay in control steps. 1 step = 100 ms at 10 Hz."""
+    # Coarse (control-step granular) delay buffer. Disabled by default in
+    # favour of the finer substep-aligned camera render below — they should
+    # NOT be combined or you'll over-delay. Kept here for backward compat
+    # and ablations.
+    obs_delay_steps_range: Sequence[int] = (0, 0)
+    """Inclusive integer range for per-env observation (RGB) delay in control steps. 0 = use only camera_lag_substeps; 1 = adds 100 ms on top."""
     max_obs_delay_steps: int = 3
     """Capacity of the per-sensor circular RGB buffer. Must be > the max of obs_delay_steps_range."""
+
+    # Substep-aligned camera lag. At sim_freq=100 / control_freq=10 there are
+    # 10 physics substeps per action; we render the camera at substep
+    # (sim_steps_per_control - camera_lag_substeps), which means the image
+    # the policy reads at decision time t was sampled `camera_lag_substeps *
+    # sim_dt` *before* t. Measured real cam lag is 49 ms → K=5 substeps at
+    # 100 Hz physics = 50 ms. This gives ~10 ms granularity instead of the
+    # 100 ms granularity of `obs_delay_steps_range`.
+    # Set to 0 to disable (image rendered at end of control step, no lag).
+    camera_lag_substeps: int = 5
+    """Substeps before the control-step boundary at which the camera is rendered. 5 @ sim_freq=100 = 50 ms ≈ measured 49 ms real camera lag."""
 
     # === Image-pipeline domain randomization ===
     # Applied to every RGB sensor frame BEFORE the policy sees it, to bracket
@@ -206,6 +219,12 @@ class BaseRandomEnv(BaseEnv):
                     setattr(self.domain_randomization_config, key, value)
         elif isinstance(domain_randomization_config, RandomizationConfig):
             self.domain_randomization_config = domain_randomization_config
+
+        # Substep-aligned camera lag state. Set up BEFORE super().__init__
+        # because _before_control_step / _after_simulation_step may be called
+        # during sapien_env's first reset path.
+        self._mid_step_sensor_cache: dict = {}
+        self._current_substep: int = 0
 
         super().__init__(*args, **kwargs)
 
@@ -832,9 +851,65 @@ class BaseRandomEnv(BaseEnv):
             dtype=torch.float32, device=self.device)
         self._wrist_camera_dr_offsets[env_idx.to(self.device)] = rand * scales
 
+    # ── Substep-aligned camera lag ─────────────────────────────────────────
+    # We render the camera at substep `sim_steps_per_control -
+    # camera_lag_substeps` instead of the default end-of-control-step. The
+    # image the policy reads at decision time t was therefore sampled
+    # camera_lag_substeps * sim_dt before t (5 substeps × 10 ms = 50 ms ≈
+    # measured real cam lag 49 ms). The cached render is returned in place
+    # of a fresh end-of-step render, so we don't double-pay GPU rendering.
+
+    def _before_control_step(self):
+        # Reset substep counter and stale cache at the START of each action.
+        super()._before_control_step()
+        self._current_substep = 0
+        self._mid_step_sensor_cache = {}
+
+    def _after_simulation_step(self):
+        super()._after_simulation_step()
+        self._current_substep += 1
+        cfg = self.domain_randomization_config
+        if cfg.camera_lag_substeps <= 0:
+            return
+        # Render at the substep whose offset from end-of-step equals
+        # camera_lag_substeps (= the "real-time age" of the frame).
+        trigger = self._sim_steps_per_control - int(cfg.camera_lag_substeps)
+        if self._current_substep != trigger:
+            return
+        # Hide objects flagged for hiding, update sensors, and snapshot the
+        # frame for each Camera. We keep `_mid_step_sensor_cache` keyed by
+        # sensor name so multiple cameras each lag in their own slot.
+        for obj in self._hidden_objects:
+            obj.hide_visual()
+        self.scene.update_render(
+            update_sensors=True, update_human_render_cameras=False)
+        for name, sensor in self.scene.sensors.items():
+            if not isinstance(sensor, Camera):
+                continue
+            obs = sensor.get_obs(
+                rgb=self.obs_mode_struct.visual.rgb,
+                depth=self.obs_mode_struct.visual.depth,
+                position=self.obs_mode_struct.visual.position,
+                segmentation=self.obs_mode_struct.visual.segmentation,
+                apply_texture_transforms=True,
+            )
+            # Detach from any active CUDA graph and clone so subsequent
+            # substeps' physics changes don't leak into the cached tensor.
+            self._mid_step_sensor_cache[name] = {
+                k: v.detach().clone() if hasattr(v, "detach") else v
+                for k, v in obs.items()
+            }
+
     # ── Obs hook: apply latency + image-pipeline DR to every RGB sensor ─────
     def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
-        sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
+        cfg = self.domain_randomization_config
+        if cfg.camera_lag_substeps > 0 and self._mid_step_sensor_cache:
+            # Use the substep-K cache; the super's update_render would
+            # overwrite the freshly-rendered GPU buffer with end-of-step
+            # state and we'd lose the lag.
+            sensor_obs = self._mid_step_sensor_cache
+        else:
+            sensor_obs = super()._get_obs_sensor_data(apply_texture_transforms)
         for name, data in sensor_obs.items():
             if not isinstance(data, dict) or "rgb" not in data:
                 continue
@@ -842,6 +917,8 @@ class BaseRandomEnv(BaseEnv):
             # Order matters: delay BEFORE image DR so a stale frame still
             # carries its own per-step noise (mirrors a real camera, where
             # sensor noise is fresh each frame even when the frame is late).
+            # When camera_lag_substeps>0, obs_delay_steps_range=(0,0) so
+            # this is a no-op — the substep render is the only lag source.
             rgb = self._apply_obs_delay(name, rgb)
             rgb = self._apply_image_pipeline_dr(rgb)
             data["rgb"] = rgb
