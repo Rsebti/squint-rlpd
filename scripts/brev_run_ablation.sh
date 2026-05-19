@@ -52,9 +52,23 @@ case "$N_DISTRACTORS" in
   *) STAGE="eval_n${N_DISTRACTORS}" ;;
 esac
 
-# 7 s episode @ 10 Hz control = 70 steps. (Sim_freq does NOT change this.)
+# Episode length in control steps (1 step = 1/CONTROL_FREQ s = 100 ms @ 10 Hz).
+# Defaults to 7 s (70 steps). Override for pick-only (e.g. EP_STEPS=40 = 4 s).
 CONTROL_FREQ=10
-EP_STEPS=70
+EP_STEPS="${EP_STEPS:-70}"
+
+# Pick-only mode: when true, env's reward = grasp+stay-still-for-1s (no place).
+# Episode auto-terminates on success. False → full pick-and-place reward.
+PICK_ONLY="${PICK_ONLY:-false}"
+if [ "$PICK_ONLY" = "true" ]; then
+  PICK_ONLY_FLAG="--pick_only_reward"
+  PICK_TAG="pick"
+elif [ "$PICK_ONLY" = "false" ]; then
+  PICK_ONLY_FLAG="--no-pick_only_reward"
+  PICK_TAG="place"
+else
+  echo "ERROR: PICK_ONLY must be 'true' or 'false', got $PICK_ONLY" >&2; exit 1
+fi
 
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
@@ -74,7 +88,7 @@ BUFFER_SIZE="${BUFFER_SIZE:-4000000}"
 NUM_UPDATES="${NUM_UPDATES:-256}"
 BATCH_SIZE="${BATCH_SIZE:-768}"
 
-EXP_NAME="${EXP_NAME:-${STAGE}_sim${SIM_FREQ}_${LAT_TAG}}"
+EXP_NAME="${EXP_NAME:-${STAGE}_${PICK_TAG}_sim${SIM_FREQ}_${LAT_TAG}}"
 WANDB_PROJECT="${WANDB_PROJECT:-maniskill-so101}"
 WANDB_GROUP="${WANDB_GROUP:-SQUINT-ABLATION-${STAGE}-$(date +%Y%m%d-%H%M)}"
 
@@ -85,7 +99,8 @@ cd "${REPO_DIR:-$HOME/squint}"
 echo ""
 echo "================================================================"
 echo "  Ablation run: $EXP_NAME"
-echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS (7 s)"
+echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)"
+echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS ($((EP_STEPS / CONTROL_FREQ)) s)"
 echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
 echo "  num_envs=$NUM_ENVS  num_eval_envs=$NUM_EVAL_ENVS  buffer=$BUFFER_SIZE"
@@ -118,7 +133,8 @@ python train_squint.py \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \
-    --save_model
+    --save_model \
+    $PICK_ONLY_FLAG
 
 echo ""
 echo "Done. Checkpoint at runs/$EXP_NAME/ckpt.pt"

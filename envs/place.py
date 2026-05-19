@@ -262,6 +262,9 @@ class Place(DefaultCameraEnv):
         spawn_box_half_size=0.10,
         action_smooth_coef: float = 0.0,
         strong_grasp_coef: float = 0.5,
+        pick_only_reward: bool = False,
+        pick_stable_speed_threshold: float = 0.01,
+        pick_stable_duration_s: float = 1.0,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -276,6 +279,15 @@ class Place(DefaultCameraEnv):
         # grasp formation. Gated by is_item_grasped AND ~xy_close_to_bowl (off
         # once the cube is over the bowl, to allow release).
         self.strong_grasp_coef = float(strong_grasp_coef)
+        # Pick-only reward mode: when True, the env trains the policy to grasp
+        # the cube and hold it nearly stationary for `pick_stable_duration_s`
+        # seconds. Success terminates the episode early. The full place reward
+        # (z lift / xy-to-bowl / above-bin / release) is skipped entirely.
+        self.pick_only_reward = bool(pick_only_reward)
+        self.pick_stable_speed_threshold = float(pick_stable_speed_threshold)
+        self.pick_stable_duration_s = float(pick_stable_duration_s)
+        # Per-env consecutive-stable counter (pick-only mode). Init on _load_scene.
+        self._grasp_slow_counter = None
         self._last_action = None
         self._just_reset_mask = None
         # Per-env state for the "stay at lift xy" reward: cube xy snapshotted
@@ -879,6 +891,9 @@ class Place(DefaultCameraEnv):
             if self._cube_xy_at_lift is not None:
                 self._cube_xy_at_lift[env_idx] = 0
                 self._prev_lifted[env_idx] = False
+            # Clear the pick-only stable-grasp counter for the reset envs.
+            if self._grasp_slow_counter is not None:
+                self._grasp_slow_counter[env_idx] = 0
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1131,7 +1146,27 @@ class Place(DefaultCameraEnv):
         robot_touching_bin = self.agent.is_touching(self.bin)
         robot_touching_item = self.agent.is_touching(self.item)
 
-        success = is_item_above_bin & (~robot_touching_item) & is_robot_static & (~robot_touching_bin)
+        if self.pick_only_reward:
+            # Pick-only success: grasped AND cube nearly stationary for N
+            # *consecutive* control steps. Any single bad step resets the
+            # counter, mirroring the lift.py pick_only_reward design.
+            if self._grasp_slow_counter is None or self._grasp_slow_counter.shape[0] != item_pos.shape[0]:
+                self._grasp_slow_counter = torch.zeros(
+                    item_pos.shape[0], dtype=torch.int32, device=self.device
+                )
+            is_item_slow = item_vel < self.pick_stable_speed_threshold
+            stable_grasp = is_item_grasped & is_item_slow
+            self._grasp_slow_counter = torch.where(
+                stable_grasp,
+                self._grasp_slow_counter + 1,
+                torch.zeros_like(self._grasp_slow_counter),
+            )
+            stable_steps_required = max(
+                1, int(round(self.pick_stable_duration_s * self._control_freq))
+            )
+            success = self._grasp_slow_counter >= stable_steps_required
+        else:
+            success = is_item_above_bin & (~robot_touching_item) & is_robot_static & (~robot_touching_bin)
 
         return {
             "inside_x": inside_x,
@@ -1148,7 +1183,64 @@ class Place(DefaultCameraEnv):
             "robot_touching_item": robot_touching_item,
         }
 
+    @property
+    def _pick_only_max_steps(self) -> int:
+        """Cached lookup of the registered max_episode_steps for the terminal
+        bonus in pick-only mode. ManiSkill envs set this via the @register_env
+        decorator (e.g. PlaceCube=75). spec.max_episode_steps is often None,
+        so we read directly from the registry."""
+        if not hasattr(self, "_cached_pick_max_steps"):
+            from mani_skill.utils.registration import REGISTERED_ENVS
+            env_id = getattr(getattr(self, "spec", None), "id", None)
+            spec_max = getattr(getattr(self, "spec", None), "max_episode_steps", None)
+            if spec_max is not None:
+                self._cached_pick_max_steps = int(spec_max)
+            elif env_id and env_id in REGISTERED_ENVS:
+                self._cached_pick_max_steps = int(REGISTERED_ENVS[env_id].max_episode_steps)
+            else:
+                self._cached_pick_max_steps = 75  # PlaceCube default
+        return self._cached_pick_max_steps
+
+    def _compute_dense_reward_pick_only(self, obs: Any, action: torch.Tensor, info: dict):
+        """Pick-only reward: reach → grasp → close-hard → stay still.
+        Episode auto-terminates on success (grasped + slow for N consecutive
+        control steps); terminal bonus replaces the remaining-step reward so
+        terminating early matches "continue at peak forever" total return."""
+        tcp_to_item_dist = torch.linalg.norm(
+            self.agent.tcp_pose.p - self.item.pose.p, axis=1
+        )
+        reach = 1 - torch.tanh(5 * tcp_to_item_dist)
+        is_grasped = info["is_item_grasped"].float()
+
+        gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
+        target_qpos = self.agent.controller.controllers["arm"]._target_qpos
+        target_grip = target_qpos[:, -1]
+        target_closure = torch.clamp(
+            (gripper_max - target_grip) / (gripper_max - gripper_min),
+            0.0, 1.0,
+        )
+
+        reward = (
+            (1 - is_grasped) * reach
+            + is_grasped
+            + self.strong_grasp_coef * target_closure * is_grasped
+        )
+        reward = reward - 3.0 * info["robot_touching_table"].float()
+
+        # Terminal bonus: (max_steps - elapsed) · per_step_peak. With
+        # per_step_peak = 1 + strong_grasp_coef the success branch yields the
+        # same total return as a hypothetical "stay at peak" continuation.
+        per_step_peak = 1.0 + self.strong_grasp_coef
+        max_steps = self._pick_only_max_steps
+        remaining = (max_steps - self.elapsed_steps.float()).clamp(min=0)
+        reward = torch.where(
+            info["success"], per_step_peak * remaining, reward
+        )
+        return reward
+
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        if self.pick_only_reward:
+            return self._compute_dense_reward_pick_only(obs, action, info)
         # Baseline 4398ce9 reward (hard reset). Components:
         #   reach: dense up to 2.0
         #   grasped: replace reach with 3 + place_reward
