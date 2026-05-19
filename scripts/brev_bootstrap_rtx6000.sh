@@ -34,9 +34,31 @@ case "$N_DISTRACTORS" in
   3) _STAGE=eval3 ;;
   *) _STAGE="eval_n${N_DISTRACTORS}" ;;
 esac
-export EXP_NAME="${EXP_NAME:-${_STAGE}_rtx6000_32x32}"
 export TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
-export WANDB_GROUP="${WANDB_GROUP:-SQUINT-RTX6000-32x32-${_STAGE}-$(date +%Y%m%d-%H%M)}"
+
+# Inner launcher (defaults to the legacy 32×32 script). Set
+# LAUNCHER=scripts/brev_run_ablation.sh to use the ablation launcher and
+# combine with PICK_ONLY / EP_STEPS / SIM_FREQ / LATENCY overrides.
+export LAUNCHER="${LAUNCHER:-scripts/brev_run_rtx6000_32x32.sh}"
+
+# Only inject a default EXP_NAME / WANDB_GROUP for the 32×32 launcher. The
+# ablation launcher computes its own informative names from PICK_ONLY +
+# SIM_FREQ + LATENCY when EXP_NAME is unset.
+if [ "$LAUNCHER" = "scripts/brev_run_rtx6000_32x32.sh" ]; then
+    export EXP_NAME="${EXP_NAME:-${_STAGE}_rtx6000_32x32}"
+    export WANDB_GROUP="${WANDB_GROUP:-SQUINT-RTX6000-32x32-${_STAGE}-$(date +%Y%m%d-%H%M)}"
+else
+    export EXP_NAME="${EXP_NAME:-}"
+    export WANDB_GROUP="${WANDB_GROUP:-}"
+fi
+
+# Optional pass-through overrides (only forwarded if set). The inner launcher
+# applies its own defaults for any that come through empty.
+export PICK_ONLY="${PICK_ONLY:-}"
+export EP_STEPS="${EP_STEPS:-}"
+export NUM_ENVS="${NUM_ENVS:-}"
+export SIM_FREQ="${SIM_FREQ:-}"
+export LATENCY="${LATENCY:-}"
 
 REPO_DIR="$HOME/squint"
 SQUINT_REMOTE="https://github.com/fedecomi04/squint.git"
@@ -86,7 +108,12 @@ tmux new-session -d -s squint \
      export EXP_NAME='$EXP_NAME' && \
      export TOTAL_TIMESTEPS='$TOTAL_TIMESTEPS' && \
      export WANDB_GROUP='$WANDB_GROUP' && \
-     bash scripts/brev_run_rtx6000_32x32.sh 2>&1 | tee $HOME/training.log"
+     export PICK_ONLY='$PICK_ONLY' && \
+     export EP_STEPS='$EP_STEPS' && \
+     export NUM_ENVS='$NUM_ENVS' && \
+     export SIM_FREQ='$SIM_FREQ' && \
+     export LATENCY='$LATENCY' && \
+     bash $LAUNCHER 2>&1 | tee $HOME/training.log"
 
 echo ""
 echo "================================================================"
