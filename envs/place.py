@@ -28,22 +28,23 @@ from .robot.so101 import SO101
 # env.reset(options={"goal_color_idx": <int or 1-D tensor>}).
 COLOR_PALETTE = np.array(
     [
-        # Source for each value:
-        #   * red / blue / purple / orange: MEASURED median pixel from the real
-        #     wrist camera (2026-05-19) — these are what the policy sees at
-        #     deploy under nominal lighting.
-        #   * green / yellow: ADJUSTED toward canonical "secondary" hues. The
-        #     real-cube measurements (84,103,83 → S=0.19 grey-green; 214,175,
-        #     95 → S=0.56 mustardy) were too muted to be visually recognisable
-        #     as green/yellow; bumping S to the same 0.65–0.80 band as the
-        #     other cubes while keeping V in the measured brightness range.
+        # Tuned 2026-05-19 by interactive sweep (examples/sweep_palette_*.py)
+        # against the locked scene (exposure=1.80, table_albedo=0.85,
+        # bowl_emission=0.80). Starts from the Friday 2026-05-15 commit
+        # 2783d83 palette (hand-picked vibrant) and lifts saturation toward
+        # 1.0 (sat_lift=0.85). Per-color V targets keep red/orange/purple
+        # deep in the rendered frame while bringing originally-dark blue and
+        # green up enough to read against the table. Orange hue is shifted
+        # from Friday's H=12° to H=16° (red-orange / tomato) — final pick
+        # after a separate fine-tune sweep to make it more yellow-red while
+        # staying distinguishable from the red cube at H=7.5°.
         #                                       (R,   G,   B)    S     V
-        [128/255,  54/255,  46/255],  # 0 red     (128, 54,  46)  0.64  0.50   measured×0.7 (darker)
-        [ 28/255,  65/255, 137/255],  # 1 blue    ( 28, 65, 137)  0.80  0.54   measured
-        [ 36/255, 108/255,  36/255],  # 2 green   ( 36,108,  36)  0.67  0.42   adjusted
-        [220/255, 195/255,  55/255],  # 3 yellow  (220,195,  55)  0.75  0.86   adjusted
-        [ 88/255,  55/255,  97/255],  # 4 purple  ( 88, 55,  97)  0.43  0.38   measured
-        [222/255, 102/255,  68/255],  # 5 orange  (222,102,  68)  0.69  0.87   measured
+        [128/255,  18/255,   3/255],  # 0 red     (128, 18,   3)  0.98  0.50
+        [  1/255,  37/255, 140/255],  # 1 blue    (  1, 37, 140)  0.99  0.55
+        [  6/255, 115/255,  19/255],  # 2 green   (  6,115,  19)  0.95  0.45
+        [217/255, 187/255,  11/255],  # 3 yellow  (217,187,  11)  0.95  0.85
+        [ 85/255,   7/255,  89/255],  # 4 purple  ( 85,  7,  89)  0.92  0.35
+        [166/255,  49/255,   6/255],  # 5 orange  (166, 49,   6)  0.96  0.65   hue=16°
     ],
     dtype=np.float32,
 )

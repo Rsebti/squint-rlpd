@@ -54,7 +54,7 @@ CONFIG = {
     # the displayed quality matches the real camera's quality.
     'downsample_size': None,
     'control_mode': None,
-    'domain_randomization': True,
+    'domain_randomization': False,
 
     # Visualization settings
     'window_size': 512,

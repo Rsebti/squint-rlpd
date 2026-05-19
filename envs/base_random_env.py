@@ -330,13 +330,16 @@ class BaseRandomEnv(BaseEnv):
         cfg = self.domain_randomization_config
 
         if not (self.domain_randomization and cfg.randomize_lighting):
-            # Deterministic fallback (eval / DR off): fixed neutral lighting.
+            # Deterministic fallback (eval / DR off): low ambient + a strong
+            # key directional + mild fills. Matches the DR mid-point and gives
+            # a ~5× lit:shadow ratio so cube faces have visible Lambertian
+            # shading instead of being washed flat by ambient.
             for i in env_idx.tolist():
                 if i >= len(self._dir_lights):
                     continue
-                self.scene.sub_scenes[i].render_system.ambient_light = [0.45, 0.45, 0.45]
+                self.scene.sub_scenes[i].render_system.ambient_light = [0.10, 0.10, 0.10]
                 for k, light in enumerate(self._dir_lights[i]):
-                    g = 0.5 if k == 0 else 0.2
+                    g = 0.85 if k == 0 else 0.15
                     light.set_color([g, g, g])
             return
 
