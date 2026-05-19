@@ -340,7 +340,7 @@ class LiveCameraTuner:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Live wrist camera tuning (SO101)")
-    parser.add_argument("--env-id", default="SO101ReachCube-v1", help="Sim environment ID")
+    parser.add_argument("--env-id", default="SO101PlaceCube-v1", help="Sim environment ID")
     parser.add_argument("--sim-width", type=int, default=480)
     parser.add_argument("--sim-height", type=int, default=480)
     args = parser.parse_args()

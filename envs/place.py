@@ -262,7 +262,6 @@ class Place(DefaultCameraEnv):
         spawn_box_half_size=0.10,
         action_smooth_coef: float = 0.0,
         strong_grasp_coef: float = 0.5,
-        gripper_hold_coef: float = 0.2,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -272,17 +271,17 @@ class Place(DefaultCameraEnv):
         # _last_action is lazily initialised on first reward call when
         # num_envs/device are known.
         self.action_smooth_coef = float(action_smooth_coef)
-        # Sim2real grasp-stability shaping (only active while is_item_grasped):
-        #   strong_grasp_coef: scales bonus for target_qpos[gripper] near min
-        #     (fully-closed) → policy learns to clamp HARD at grasp formation.
-        #   gripper_hold_coef: scales penalty on |a_gripper| → policy learns
-        #     to send 0-delta on the gripper once holding (target stays put,
-        #     real servo doesn't drift open). Both default to mild values
-        #     that don't outweigh the +2.5 / +3 grasp ladder.
+        # Sim2real strong-grasp bonus: rewards target_qpos[gripper] near min
+        # (fully-closed) while grasped, so the policy learns to clamp HARD at
+        # grasp formation. Gated by is_item_grasped AND ~xy_close_to_bowl (off
+        # once the cube is over the bowl, to allow release).
         self.strong_grasp_coef = float(strong_grasp_coef)
-        self.gripper_hold_coef = float(gripper_hold_coef)
         self._last_action = None
         self._just_reset_mask = None
+        # Per-env state for the "stay at lift xy" reward: cube xy snapshotted
+        # at the moment of grasp+lift transition. Lazy init on first reward call.
+        self._cube_xy_at_lift = None
+        self._prev_lifted = None
         if not (0 <= n_distractors <= 4):
             # Distractors are placed face-to-face on the target's 4 cardinal
             # faces (one per face), so the geometry caps at 4.
@@ -876,6 +875,10 @@ class Place(DefaultCameraEnv):
             # magnitude of a_0 instead of a true rate ||a_t - a_{t-1}||).
             if self._just_reset_mask is not None:
                 self._just_reset_mask[env_idx] = True
+            # Clear the lift-xy lock + lifted-prev flag for the reset envs.
+            if self._cube_xy_at_lift is not None:
+                self._cube_xy_at_lift[env_idx] = 0
+                self._prev_lifted[env_idx] = False
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1173,25 +1176,60 @@ class Place(DefaultCameraEnv):
         # Place reward (only used by the grasped-and-lifted branch below).
         # Two components, both in [0,1], summed → [0, 2]:
         #   place_reward_z  : encourages cube z to first reach travel altitude
-        #                     (8 cm). Once xy-close, the z target flips to
+        #                     (10 cm). Once xy-close, the z target flips to
         #                     rim_z (6 cm) so the cube descends to drop.
-        #   place_reward_xy : only fires once the cube is above travel altitude
-        #                     OR already xy-close to the bowl. This prevents
-        #                     the policy from racing diagonally to (rim_xy, rim_z)
-        #                     by going up and over instead.
+        #   place_reward_xy : phase-dependent —
+        #                       below travel & not close-to-bowl → reward
+        #                         staying at the cube xy snapshotted at the
+        #                         lift moment (no diagonal drift while rising).
+        #                       above travel OR close-to-bowl → reward moving
+        #                         cube xy toward the bowl center.
         rim_z = goal_xyz[..., 2]
         travel_z = torch.full_like(rim_z, FIXED_TRAVEL_Z)
 
         item_to_goal_dist_xy = torch.linalg.norm(goal_xyz[..., :2] - item_pos[..., :2], dim=1)
-        item_close_to_goal = (item_to_goal_dist_xy <= self.bin_radius)
+        # Fixed 10 cm "above-the-bowl" radius. Used by both place_reward_xy
+        # (gates the xy reward) and the strong-grasp shutoff (lets the policy
+        # relax its hold once it's over the bowl).
+        XY_CLOSE_RADIUS = 0.10
+        item_close_to_goal = (item_to_goal_dist_xy <= XY_CLOSE_RADIUS)
 
         z_target = torch.where(item_close_to_goal, rim_z, travel_z)
         item_to_goal_dist_z = torch.abs(item_pos[..., 2] - z_target)
         place_reward_z = 1 - torch.tanh(10.0 * item_to_goal_dist_z)
 
+        # ── Lift-xy snapshot (per env) ─────────────────────────────────────
+        # On the step where (grasped & lifted) first goes True, snapshot the
+        # cube's xy. While the cube is still rising (below travel altitude and
+        # not yet over the bowl) the xy reward pushes the cube to STAY at
+        # this snapshotted xy — i.e., go straight up, no diagonal drift.
+        # Once above travel altitude OR within XY_CLOSE_RADIUS, the xy reward
+        # flips to pulling toward the bowl center.
+        if self._cube_xy_at_lift is None or self._cube_xy_at_lift.shape[0] != item_pos.shape[0]:
+            self._cube_xy_at_lift = torch.zeros(
+                (item_pos.shape[0], 2), device=item_pos.device, dtype=item_pos.dtype
+            )
+            self._prev_lifted = torch.zeros(
+                (item_pos.shape[0],), dtype=torch.bool, device=item_pos.device
+            )
+        currently_lifted = info["is_item_grasped"] & info["item_lifted"]
+        just_lifted = currently_lifted & (~self._prev_lifted)
+        if just_lifted.any():
+            self._cube_xy_at_lift[just_lifted] = item_pos[just_lifted, :2]
+        self._prev_lifted = currently_lifted.clone()
+
         above_travel = item_pos[..., 2] >= (travel_z - 0.02)  # within 2cm of travel altitude
-        xy_gate = (above_travel | item_close_to_goal).float()
-        place_reward_xy = xy_gate * (1 - torch.tanh(5.0 * item_to_goal_dist_xy))
+        xy_toward_bowl_active = above_travel | item_close_to_goal
+
+        xy_to_bowl_reward = 1 - torch.tanh(5.0 * item_to_goal_dist_xy)
+        d_xy_drift = torch.linalg.norm(item_pos[..., :2] - self._cube_xy_at_lift, dim=1)
+        stay_xy_reward = 1 - torch.tanh(5.0 * d_xy_drift)
+
+        place_reward_xy = torch.where(
+            xy_toward_bowl_active,
+            xy_to_bowl_reward,
+            stay_xy_reward,
+        )
 
         place_reward = place_reward_z + place_reward_xy
 
@@ -1206,39 +1244,21 @@ class Place(DefaultCameraEnv):
         grasped_and_lifted = info["is_item_grasped"] & info["item_lifted"]
         reward[grasped_and_lifted] = (3 + place_reward)[grasped_and_lifted]
 
-        # ── Sim2real grasp-stability shaping ────────────────────────────────
-        # In sim the PD masks small gripper-command perturbations; on the real
-        # Feetech servo the delta-target controller accumulates every nonzero
-        # gripper action into `target_qpos[-1]`, drifting the gripper open
-        # over many steps → the cube slips out during the lift / carry.
-        #
-        # Two-stage shaping:
-        #   (a) STRONG-GRASP BONUS  (active while is_item_grasped, incl. lift)
-        #       Reward driving target_qpos[-1] toward gripper_min (fully closed).
-        #       The cube blocks physical closure but the SERVO target keeps
-        #       applying full clamp force.
-        #   (b) HOLD-STILL PENALTY  (active ONLY while item_lifted)
-        #       Penalize |a_gripper| once lifted, so the policy learns "once
-        #       you've got it AND lifted it, stop sending deltas". Deliberately
-        #       NOT applied during the grasp phase, otherwise the per-step
-        #       penalty (≤ 0.2 at delta_cap=0.2) would dominate the per-step
-        #       closure bonus (≈ 0.5 × 0.2/2.27 ≈ 0.044) and the policy would
-        #       avoid closing hard.
-        # Coefficients exposed via __init__: strong_grasp_coef, gripper_hold_coef.
-        # SO101's controller is a CombinedController wrapping the actual
-        # PDJointPos controller under the 'arm' key, so _target_qpos lives one
-        # level deeper than on a plain controller.
+        # ── Sim2real strong-grasp shaping ───────────────────────────────────
+        # On real Feetech servos the delta-target controller drifts the gripper
+        # open if the policy keeps sending small nonzero deltas during the lift.
+        # Reward driving target_qpos[gripper] toward fully-closed *while* the
+        # cube is grasped and NOT yet over the bowl. Shut off once xy-close to
+        # the bowl so the policy can relax its clamp and release into the bin.
+        # SO101's controller wraps the arm PDJointPos under controllers['arm'].
         target_qpos = self.agent.controller.controllers["arm"]._target_qpos
         target_grip = target_qpos[:, -1]
         target_closure = torch.clamp(
             (gripper_max - target_grip) / (gripper_max - gripper_min),
             0.0, 1.0,
         )  # 1.0 = target at fully-closed
-        reward = reward + self.strong_grasp_coef * target_closure * info["is_item_grasped"].float()
-
-        if torch.is_tensor(action):
-            grip_act_mag = action[..., -1].abs()
-            reward = reward - self.gripper_hold_coef * grip_act_mag * info["item_lifted"].float()
+        strong_grasp_active = info["is_item_grasped"] & (~item_close_to_goal)
+        reward = reward + self.strong_grasp_coef * target_closure * strong_grasp_active.float()
 
         is_item_dropped = (~info["robot_touching_item"]).float()
         robot_v = torch.linalg.norm(self.agent.robot.get_qvel()[:, :-1], axis=1)

@@ -19,8 +19,8 @@ from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig, S
 # Edit these for your setup
 ROBOT_PORT = "/dev/tty.usbmodem5B141129871"
 CAMERA_INDEX = 0           # macOS: integer index. Try 1 if 0 picks the wrong cam.
-CAMERA_WIDTH = 1280
-CAMERA_HEIGHT = 720
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
 CAMERA_FPS = 30
 
 

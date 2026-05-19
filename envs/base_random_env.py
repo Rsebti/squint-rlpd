@@ -214,7 +214,7 @@ class BaseRandomEnv(BaseEnv):
         *args,
         domain_randomization_config: Union[RandomizationConfig, dict] = RandomizationConfig(),
         domain_randomization: bool = True,
-        sim_freq: int = 100,
+        sim_freq: int = 300,
         control_freq: int = 10,
         **kwargs,
     ):

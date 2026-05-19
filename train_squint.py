@@ -81,7 +81,7 @@ class Args:
     """fraction of total_timesteps after which the CNN encoder is frozen (no further updates). 0.0 = never freeze."""
 
     # Environment specific arguments
-    env_id: str = "SO101LiftCube-v1"
+    env_id: str = "SO101PlaceCube-v1"
     """the id of the environment"""
     env_domain_randomization: bool = True
     """adds domain randomization flag if env supports it"""
@@ -111,8 +111,8 @@ class Args:
     """the control mode to use for the environment"""
     action_smooth_coef: float = 0.0
     """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Disabled by default — the penalty creates a 'do nothing' attractor for from-scratch training. Enable (e.g. 0.05-0.2) only for fine-tuning a working policy if eval shows jitter."""
-    sim_freq: int = 100
-    """Physics substep rate (Hz). 100 = 10 ms/substep (default). 300 = 3.33 ms/substep (higher physics fidelity, ~3x slower sim)."""
+    sim_freq: int = 300
+    """Physics substep rate (Hz). Fixed at 300 = 3.33 ms/substep (higher physics fidelity)."""
     control_freq: int = 10
     """Control rate (Hz). Episode time per step = 1/control_freq. 7 s episode @ 10 Hz = 70 steps."""
     camera_lag_substeps_min: int = 1

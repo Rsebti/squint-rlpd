@@ -34,7 +34,7 @@ class Cv2Camera:
     This class uses CAP_AVFOUNDATION explicitly and runs a tiny background
     reader so async_read() just hands back the latest frame."""
 
-    def __init__(self, index: int, width: int = 1280, height: int = 720, fps: int = 30):
+    def __init__(self, index: int, width: int = 1920, height: int = 1080, fps: int = 30):
         self.cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cv2Camera({index}) failed to open via AVFoundation.")
@@ -54,6 +54,7 @@ class Cv2Camera:
             self.cap.release()
             raise RuntimeError(f"Cv2Camera({index}) opened but no frame after 3 s of polling.")
         self._latest = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self.frame_count = 1
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -66,6 +67,7 @@ class Cv2Camera:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 with self._lock:
                     self._latest = rgb
+                    self.frame_count += 1
 
     def async_read(self):
         with self._lock:
@@ -109,7 +111,7 @@ JOINT_UPPER = np.array([1.91986, 1.74533, 1.69, 1.65806, 2.84121, 2.0944])
 # SO101 "start" keyframe — robot rest pose. Must match envs/robot/so101.py keyframes["start"].
 # Degrees: [-2.242, -80.791, 36.747, 86.901, -82.154, -14.686].
 REST_QPOS = np.deg2rad(
-    np.array([-2.242, -80.791, 36.747, 86.901, -82.154, -14.686], dtype=np.float32)
+    np.array([0, -80.791, 36.747, 86.901, -82.154, -14.686], dtype=np.float32)
 )
 
 
@@ -145,7 +147,7 @@ class RealRobotAgent:
         self._g_servo_range = self._g_servo_max - self._g_servo_min
         robot.bus.motors["gripper"].norm_mode = MotorNormMode.DEGREES
         # Bypass lerobot's flaky macOS camera wrapper.
-        self.cameras = {"base_camera": Cv2Camera(index=CAMERA_INDEX, width=1280, height=720, fps=30)}
+        self.cameras = {"base_camera": Cv2Camera(index=CAMERA_INDEX, width=1920, height=1080, fps=30)}
 
     def get_qpos(self):
         """Measured joint angles in sim radians, shape (1, 6)."""
@@ -266,7 +268,8 @@ def init_viz():
     rr.init("squint_infer", spawn=True)
 
 
-def log_step(step, raw_rgb, policy_rgb, qpos, target_qpos, action_raw):
+def log_step(step, raw_rgb, policy_rgb, qpos, target_qpos, action_raw,
+             control_hz=None, camera_hz=None, new_frames=None):
     """Push one timestep to the Rerun viewer."""
     if rr is None:
         return
@@ -277,6 +280,12 @@ def log_step(step, raw_rgb, policy_rgb, qpos, target_qpos, action_raw):
         rr.log(f"joints/qpos_measured/{name}", rr.Scalars([float(qpos[i])]))
         rr.log(f"joints/qpos_target/{name}", rr.Scalars([float(target_qpos[i])]))
         rr.log(f"action_raw/{name}", rr.Scalars([float(action_raw[i])]))
+    if control_hz is not None:
+        rr.log("perf/control_hz", rr.Scalars([float(control_hz)]))
+    if camera_hz is not None:
+        rr.log("perf/camera_hz", rr.Scalars([float(camera_hz)]))
+    if new_frames is not None:
+        rr.log("perf/new_frames_per_step", rr.Scalars([float(new_frames)]))
 
 
 def build_state(qpos, target_qpos, goal_color, bowl_xyz=None):
@@ -303,7 +312,7 @@ def main():
     p.add_argument("--checkpoint", required=True, help="path to ckpt.pt")
     p.add_argument("--goal_color", type=int, default=0, help="0 red 1 blue 2 green 3 yellow 4 purple 5 orange")
     p.add_argument("--action_scale", type=float, default=0.15, help="safety multiplier on policy action (lower = slower)")
-    p.add_argument("--episode_steps", type=int, default=300, help="control steps per episode (300 @ 30 Hz = 10s, matches PlaceCube sim spec)")
+    p.add_argument("--episode_steps", type=int, default=600, help="control steps per episode (600 @ 30 Hz = 20s)")
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, default=True, help="open a Rerun viewer with live camera + joint plots (--no-viz to disable)")
     p.add_argument("--n_episodes", type=int, default=0, help="if >0, run this many episodes back-to-back without waiting for Enter")
     p.add_argument("--log_dir", type=str, default=None, help="if set, dump per-step npz logs there (one file per episode)")
@@ -360,12 +369,30 @@ def main():
 
             log_qpos, log_target, log_action_raw, log_policy_rgb = [], [], [], []
 
+            ema_alpha = 0.2
+            ema_control_hz, ema_camera_hz = None, None
+            cam = agent.cameras["base_camera"]
+            prev_cam_count = cam.frame_count
+            prev_step_t = None
+
             for step in range(args.episode_steps):
                 t0 = time.perf_counter()
 
                 qpos = agent.get_qpos().cpu().numpy().flatten()
                 agent.capture_sensor_data()
                 rgb = agent.get_sensor_data()["base_camera"]["rgb"]
+                cur_cam_count = cam.frame_count
+                new_frames = cur_cam_count - prev_cam_count
+                prev_cam_count = cur_cam_count
+
+                if prev_step_t is not None:
+                    dt = t0 - prev_step_t
+                    if dt > 0:
+                        inst_control_hz = 1.0 / dt
+                        inst_camera_hz = new_frames / dt
+                        ema_control_hz = inst_control_hz if ema_control_hz is None else (1 - ema_alpha) * ema_control_hz + ema_alpha * inst_control_hz
+                        ema_camera_hz = inst_camera_hz if ema_camera_hz is None else (1 - ema_alpha) * ema_camera_hz + ema_alpha * inst_camera_hz
+                prev_step_t = t0
 
                 obs_rgb = preprocess_image(rgb).to(device)
                 obs_state = build_state(
@@ -388,12 +415,18 @@ def main():
                         qpos=qpos,
                         target_qpos=target_qpos,
                         action_raw=raw_action,
+                        control_hz=ema_control_hz,
+                        camera_hz=ema_camera_hz,
+                        new_frames=new_frames,
                     )
                 if log_dir:
                     log_qpos.append(qpos.copy())
                     log_target.append(target_qpos.copy())
                     log_action_raw.append(raw_action.copy())
                     log_policy_rgb.append(obs_rgb[0].cpu().numpy().copy())
+
+                if step % 30 == 0 and ema_control_hz is not None:
+                    print(f"  step {step:4d}  control={ema_control_hz:5.1f} Hz  camera={ema_camera_hz:5.1f} Hz  new_frames={new_frames}")
 
                 time.sleep(max(0.0, 1.0 / CONTROL_HZ - (time.perf_counter() - t0)))
 

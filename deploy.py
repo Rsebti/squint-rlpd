@@ -7,9 +7,9 @@ This script handles:
 - Running evaluation episodes with keyboard controls
 
 Usage:
-    python deploy.py --checkpoint path/to/checkpoint.pt --env_id SO101ReachCube-v1
-    python deploy.py --checkpoint wandb --env_id SO101ReachCube-v1  # Load from wandb
-    python deploy.py --env_id SO101ReachCube-v1  # Random agent (no checkpoint)
+    python deploy.py --checkpoint path/to/checkpoint.pt --env_id SO101PlaceCube-v1
+    python deploy.py --checkpoint wandb --env_id SO101PlaceCube-v1  # Load from wandb
+    python deploy.py --env_id SO101PlaceCube-v1  # Random agent (no checkpoint)
 
 Keyboard Controls:
     's' - Skip current episode
@@ -58,7 +58,7 @@ from train_squint import DeployAgent
 class Args:
     checkpoint: Optional[str] = None
     """Path to checkpoint file, or 'wandb' to load from wandb. If None, uses random agent."""
-    env_id: str = "SO101ReachCube-v1"
+    env_id: str = "SO101PlaceCube-v1"
     """Environment ID (must match training environment)."""
     obs_mode: str = "rgb"
     """Observation mode for the environment."""
