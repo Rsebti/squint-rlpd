@@ -96,11 +96,12 @@ class RandomizationConfig:
     # couple of point lights (local highlights). Every level is re-sampled per
     # episode, then all are scaled by one global exposure multiplier. The lights
     # are always WHITE — only their intensity is randomized, never their hue.
-    room_brightness_range: Sequence[float] = (0.10, 0.30)
+    room_brightness_range: Sequence[float] = (0.05, 0.15)
     """Per-episode ambient fill level — the global, uniform room brightness.
-    Lowered so the key light dominates and each cube face shows a distinct
-    Lambertian shade (matches real-world desk lighting where lit:shadow
-    contrast is roughly 3–8×)."""
+    Halved (was (0.10, 0.30)) — at the old centre 0.20 + exposure 1.0 the
+    flat ambient was washing the diffuse-shaded cube faces; bringing it down
+    keeps the key/fill directionals visibly dominant so each face has a
+    distinct Lambertian shade. Mid = 0.10."""
     exposure_range: Sequence[float] = (0.55, 1.45)
     """Per-episode global exposure multiplier applied on top of every light."""
     num_directional_lights: int = 3

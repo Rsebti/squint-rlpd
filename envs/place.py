@@ -28,19 +28,22 @@ from .robot.so101 import SO101
 # env.reset(options={"goal_color_idx": <int or 1-D tensor>}).
 COLOR_PALETTE = np.array(
     [
-        # MEASURED from the real wrist camera (2026-05-19 median sample on each
-        # cube under nominal lighting). These are what the policy actually sees
-        # at deploy — not what looks "vivid" to a human eye. Note green is
-        # almost grey-green (S=0.19) and purple is a dark plum (S=0.43, V=0.38);
-        # the sim must reproduce these muted hues so the goal-color signal
-        # learned in training generalises to deploy.
+        # Source for each value:
+        #   * red / blue / purple / orange: MEASURED median pixel from the real
+        #     wrist camera (2026-05-19) — these are what the policy sees at
+        #     deploy under nominal lighting.
+        #   * green / yellow: ADJUSTED toward canonical "secondary" hues. The
+        #     real-cube measurements (84,103,83 → S=0.19 grey-green; 214,175,
+        #     95 → S=0.56 mustardy) were too muted to be visually recognisable
+        #     as green/yellow; bumping S to the same 0.65–0.80 band as the
+        #     other cubes while keeping V in the measured brightness range.
         #                                       (R,   G,   B)    S     V
-        [183/255,  77/255,  65/255],  # 0 red    (183, 77,  65)  0.65  0.72
-        [ 28/255,  65/255, 137/255],  # 1 blue   (28,  65, 137)  0.80  0.54
-        [ 84/255, 103/255,  83/255],  # 2 green  (84, 103,  83)  0.19  0.40
-        [214/255, 175/255,  95/255],  # 3 yellow (214,175,  95)  0.56  0.84
-        [ 88/255,  55/255,  97/255],  # 4 purple (88,  55,  97)  0.43  0.38
-        [222/255, 102/255,  68/255],  # 5 orange (222,102,  68)  0.69  0.87
+        [128/255,  54/255,  46/255],  # 0 red     (128, 54,  46)  0.64  0.50   measured×0.7 (darker)
+        [ 28/255,  65/255, 137/255],  # 1 blue    ( 28, 65, 137)  0.80  0.54   measured
+        [ 36/255, 108/255,  36/255],  # 2 green   ( 36,108,  36)  0.67  0.42   adjusted
+        [220/255, 195/255,  55/255],  # 3 yellow  (220,195,  55)  0.75  0.86   adjusted
+        [ 88/255,  55/255,  97/255],  # 4 purple  ( 88, 55,  97)  0.43  0.38   measured
+        [222/255, 102/255,  68/255],  # 5 orange  (222,102,  68)  0.69  0.87   measured
     ],
     dtype=np.float32,
 )
