@@ -117,14 +117,14 @@ class Args:
     """Pick-only side-approach curriculum. Until the FIXED gripper finger touches the cube, the reward is (reach + open_coef·gripper_openness) only — no grasp/strong-grasp incentive — forcing the policy to approach with the gripper fully open and land the fixed finger first. Once touched (sticky for the episode), the normal grasp ladder kicks in. Reduces the failure mode where the policy arrives top-down with the moving finger pre-closed (works in sim, fails in real)."""
     pick_side_approach_open_coef: float = 0.3
     """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
-    sim_freq: int = 300
-    """Physics substep rate (Hz). Fixed at 300 = 3.33 ms/substep (higher physics fidelity)."""
+    sim_freq: int = 100
+    """Physics substep rate (Hz). Default 100 Hz = 10 ms/substep. Won the 2026-05-20 sim2real ablation vs 300 Hz."""
     control_freq: int = 10
     """Control rate (Hz). Episode time per step = 1/control_freq. 7 s episode @ 10 Hz = 70 steps."""
-    camera_lag_substeps_min: int = 1
-    """Min per-env camera-lag substeps (inclusive). At sim_freq=100, 1 substep = 10 ms. Set both min/max to 0 to disable image lag."""
-    camera_lag_substeps_max: int = 5
-    """Max per-env camera-lag substeps (inclusive). At sim_freq=100, 5 substeps = 50 ms; at sim_freq=300, 15 substeps = 50 ms."""
+    camera_lag_substeps_min: int = 0
+    """Min per-env camera-lag substeps (inclusive). Default 0 = no camera lag (won the 2026-05-20 ablation vs latency-on). At sim_freq=100, 1 substep = 10 ms."""
+    camera_lag_substeps_max: int = 0
+    """Max per-env camera-lag substeps (inclusive). Default 0 = no camera lag. At sim_freq=100, 5 substeps = 50 ms; at sim_freq=300, 15 substeps = 50 ms."""
     obs_mode: Optional[str] = "rgb"
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"

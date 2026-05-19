@@ -19,8 +19,8 @@ set -euo pipefail
 export WANDB_API_KEY="${WANDB_API_KEY:-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}"
 
 # ── Ablation knobs (the 4 runs) ─────────────────────────────────────────────
-SIM_FREQ="${SIM_FREQ:-300}"
-LATENCY="${LATENCY:-on}"
+SIM_FREQ="${SIM_FREQ:-100}"
+LATENCY="${LATENCY:-off}"
 
 # Map LATENCY → camera_lag_substeps range. At sim_freq=100, 1 substep = 10 ms;
 # at sim_freq=300, 1 substep = 3.33 ms. Keep the *wall-clock* lag range at
