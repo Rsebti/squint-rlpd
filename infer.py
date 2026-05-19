@@ -94,9 +94,11 @@ CALIBRATION_ID = "so101_follower_arm"     # filename (no extension) of your cali
 CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .json
 
 # ── Contract constants (must match the training env) ───────────────────────
-IMAGE_H = 36             # CNN input height (landscape, matches sim wrist cam 16:9)
-IMAGE_W = 64             # CNN input width  (64/36 = 16/9 EXACTLY; matches the
-                         # 2026-05-19 real-camera calibration at ÷30 of 1920×1080)
+IMAGE_H = 80             # CNN input height (landscape, ≈16:9 — sim and real
+IMAGE_W = 144            # CNN input width. 144/80 = 1.8 (16:9 = 1.778; ~1%
+                         # off, applied uniformly to both sim render and real
+                         # 1920×1080 → no sim/real mismatch). H≥56 branch in
+                         # the training CNN gives flatten 64·6·14 = 5376.
 N_COLORS = 6             # goal-color one-hot length
 CONTROL_HZ = 30          # sim sim_freq=300 / control_freq=30 (matches training)
 
@@ -196,11 +198,11 @@ class RealRobotAgent:
 # �═══════════════════════════════════════════════════════════════════════════╗
 # ║  Policy network — architecture must match the checkpoint exactly          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-# For 36×64 input (16:9, matches 1920×1080 calibration), the CNN flatten is
-# 64 * 5 * 12 = 3840. Math: Conv(4, stride=2) -> Conv(4, stride=2) -> Conv(3,
-# stride=1) on 36×64 yields 17×31 -> 7×14 -> 5×12. Projection output kept at
-# 50 to match train_squint.py:362.
-CNN_FLATTEN_DIM = 3840
+# For 80×144 input, training picks the Atari-style 8/4, 4/2, 3/1 stride
+# profile (H>=56 branch in train_squint.py). Flatten math:
+#   Conv(8, s=4) -> Conv(4, s=2) -> Conv(3, s=1) on 80×144
+#   yields 19×35 -> 8×16 -> 6×14, flatten = 64*6*14 = 5376.
+CNN_FLATTEN_DIM = 5376
 RGB_PROJ_DIM = 50
 
 
@@ -208,7 +210,7 @@ class CNNEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, 4, stride=2), nn.ReLU(),
+            nn.Conv2d(3, 32, 8, stride=4), nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2), nn.ReLU(),
             nn.Conv2d(64, 64, 3, stride=1), nn.ReLU(),
             nn.Flatten(),

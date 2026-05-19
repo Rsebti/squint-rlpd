@@ -134,12 +134,14 @@ class Args:
     real-camera 16:9 aspect (1920x1080 calibrated) at ¼ resolution."""
     render_width: int = 640
     """sim wrist-camera render width (before downsampling)"""
-    image_height: int = 36
+    image_height: int = 80
     """policy-input image height (after downsampling)"""
-    image_width: int = 64
-    """policy-input image width (after downsampling). 64/36 = 16/9 EXACTLY,
-    and (640,360)→(64,36) is an exact ÷10 area-resize (uniform 10×10 pool).
-    Preserves the real-camera landscape aspect with no squash or aliasing seam."""
+    image_width: int = 144
+    """policy-input image width (after downsampling). 144/80 = 1.8 (≈ 16:9
+    1.778, within 1.2%). Sim renders 16:9 → area-resize 360×640 → 80×144;
+    real cam 1920×1080 → area-resize 1920×1080 → 80×144. Both pipelines apply
+    the same tiny non-uniform downsample, so the sim→real distortion is
+    matched. CNN flatten dim (H≥56 branch) = 64*6*14 = 5376."""
     apply_jitter: bool = True
     """applies color jitter to all input RGB observations (better for sim2real)"""
 
