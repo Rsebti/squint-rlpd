@@ -57,8 +57,17 @@ fi
 export PICK_ONLY="${PICK_ONLY:-}"
 export EP_STEPS="${EP_STEPS:-}"
 export NUM_ENVS="${NUM_ENVS:-}"
+export NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-}"
+export BUFFER_SIZE="${BUFFER_SIZE:-}"
+export NUM_UPDATES="${NUM_UPDATES:-}"
+export BATCH_SIZE="${BATCH_SIZE:-}"
+export IMAGE_HEIGHT="${IMAGE_HEIGHT:-}"
+export IMAGE_WIDTH="${IMAGE_WIDTH:-}"
+export RENDER_HEIGHT="${RENDER_HEIGHT:-}"
+export RENDER_WIDTH="${RENDER_WIDTH:-}"
 export SIM_FREQ="${SIM_FREQ:-}"
 export LATENCY="${LATENCY:-}"
+export SEED="${SEED:-}"
 
 REPO_DIR="$HOME/squint"
 SQUINT_REMOTE="https://github.com/fedecomi04/squint.git"
@@ -111,8 +120,17 @@ tmux new-session -d -s squint \
      export PICK_ONLY='$PICK_ONLY' && \
      export EP_STEPS='$EP_STEPS' && \
      export NUM_ENVS='$NUM_ENVS' && \
+     export NUM_EVAL_ENVS='$NUM_EVAL_ENVS' && \
+     export BUFFER_SIZE='$BUFFER_SIZE' && \
+     export NUM_UPDATES='$NUM_UPDATES' && \
+     export BATCH_SIZE='$BATCH_SIZE' && \
+     export IMAGE_HEIGHT='$IMAGE_HEIGHT' && \
+     export IMAGE_WIDTH='$IMAGE_WIDTH' && \
+     export RENDER_HEIGHT='$RENDER_HEIGHT' && \
+     export RENDER_WIDTH='$RENDER_WIDTH' && \
      export SIM_FREQ='$SIM_FREQ' && \
      export LATENCY='$LATENCY' && \
+     export SEED='$SEED' && \
      bash $LAUNCHER 2>&1 | tee $HOME/training.log"
 
 echo ""
