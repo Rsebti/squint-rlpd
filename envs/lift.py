@@ -9,7 +9,7 @@ from transforms3d.euler import euler2quat
 
 import mani_skill.envs.utils.randomization as randomization
 from mani_skill.utils import common
-from mani_skill.utils.registration import register_env
+from mani_skill.utils.registration import REGISTERED_ENVS, register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
@@ -65,9 +65,15 @@ class Lift(DefaultCameraEnv):
         domain_randomization=False,
         spawn_box_pos=[0.3, 0],
         spawn_box_half_size=0.2 / 2,
+        pick_only_reward: bool = False,
+        pick_stable_speed_threshold: float = 0.01,
+        pick_stable_duration_s: float = 1.0,
         **kwargs,
     ):
         self.item_type = item_type
+        self.pick_only_reward = pick_only_reward
+        self.pick_stable_speed_threshold = float(pick_stable_speed_threshold)
+        self.pick_stable_duration_s = float(pick_stable_duration_s)
 
         # Robot-specific configuration
         if robot_uids == "so100":
@@ -272,6 +278,10 @@ class Lift(DefaultCameraEnv):
         # randomize or set a fixed robot color (from parent class)
         self._randomize_robot_color()
 
+        # Per-env counter of consecutive control steps with (grasped & cube |v| < threshold).
+        # Used only when pick_only_reward=True to fire success after pick_stable_duration_s.
+        self._grasp_slow_counter = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+
 
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
@@ -307,6 +317,8 @@ class Lift(DefaultCameraEnv):
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             self.item.set_pose(Pose.create_from_pq(xyz, qs))
 
+            self._grasp_slow_counter[env_idx] = 0
+
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
@@ -332,7 +344,7 @@ class Lift(DefaultCameraEnv):
                 item_pose=self.item.pose.raw_pose,
                 tcp_pos=self.agent.tcp_pose.raw_pose,
                 tcp_to_item_grip_pos=self.item.pose.p - self.agent.tcp_pos,
-                dist_to_rest_qpos=self.agent.controller._target_qpos[:, :-1] - self.rest_qpos[:-1],
+                dist_to_rest_qpos=self.agent.controller.controllers["arm"]._target_qpos[:, :-1] - self.rest_qpos[:-1],
             )
             if self.domain_randomization:
                 gripper_params = self.get_gripper_params()
@@ -355,7 +367,7 @@ class Lift(DefaultCameraEnv):
         reached_object = tcp_to_obj_dist < 0.03
         is_item_grasped = self.agent.is_grasping(self.item)
 
-        target_qpos = self.agent.controller._target_qpos.clone()  
+        target_qpos = self.agent.controller.controllers["arm"]._target_qpos.clone()
         distance_to_rest_qpos = torch.linalg.norm(
             target_qpos[:, :-1] - self.rest_qpos[:-1], axis=-1
         )
@@ -365,7 +377,20 @@ class Lift(DefaultCameraEnv):
         # Contact checks
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
 
-        success = item_lifted & is_item_grasped & reached_rest_qpos
+        if self.pick_only_reward:
+            item_speed = torch.linalg.norm(self.item.linear_velocity, axis=-1)
+            is_item_slow = item_speed < self.pick_stable_speed_threshold
+            stable_grasp = is_item_grasped & is_item_slow
+            # increment counter on stable_grasp, reset to 0 otherwise
+            self._grasp_slow_counter = torch.where(
+                stable_grasp,
+                self._grasp_slow_counter + 1,
+                torch.zeros_like(self._grasp_slow_counter),
+            )
+            stable_steps_required = max(1, int(round(self.pick_stable_duration_s * self._control_freq)))
+            success = self._grasp_slow_counter >= stable_steps_required
+        else:
+            success = item_lifted & is_item_grasped & reached_rest_qpos
 
         return {
             "is_item_grasped": is_item_grasped,
@@ -381,12 +406,40 @@ class Lift(DefaultCameraEnv):
         # Reach item reward
         tcp_to_item_dist = torch.linalg.norm(self.item.pose.p - self.agent.tcp_pose.p, axis=1)
         reaching_reward = 1 - torch.tanh(5 * tcp_to_item_dist)
+
+        if self.pick_only_reward:
+            # Pick-only: reach (pre-grasp only) → grasp (contact+side-force, via is_grasping) →
+            # close gripper hard (target qpos → 0 = closed-as-hard-as-possible).
+            is_grasped = info["is_item_grasped"].float()
+            gripper_target = self.agent.controller.controllers["arm"]._target_qpos[:, -1]
+            # Force-graded gate: smooth ramp from 0 to 1 as the weaker finger reaches 5 N of
+            # contact force on the cube. Gives gradient even before the binary `is_grasping`
+            # threshold fires.
+            l_forces = self.scene.get_pairwise_contact_forces(self.agent.finger1_link, self.item)
+            r_forces = self.scene.get_pairwise_contact_forces(self.agent.finger2_link, self.item)
+            min_finger_force = torch.minimum(
+                torch.linalg.norm(l_forces, axis=1),
+                torch.linalg.norm(r_forces, axis=1),
+            )
+            force_gate = (min_finger_force / 5.0).clamp(0.0, 1.0)
+            gripper_close_reward = force_gate * torch.exp(-5.0 * torch.abs(gripper_target))
+            reward = (1.0 - is_grasped) * reaching_reward + is_grasped + gripper_close_reward
+            # Penalty: arm dragging on the table.
+            reward = reward - 3.0 * info["robot_touching_table"].float()
+            # Final reward fires once on the step success becomes True (counter hits 1s).
+            # Scale by remaining episode steps × per-step peak so terminating early matches continuing.
+            # Per-step peak = 2 (grasp + close = 2 after grasp; reach = 1 before grasp).
+            per_step_peak = 2.0
+            # gymnasium's env.spec.max_episode_steps is None for ManiSkill envs; the value
+            # lives in ManiSkill's own EnvSpec registry under the env id.
+            reg_spec = REGISTERED_ENVS.get(self.spec.id) if self.spec is not None else None
+            max_steps = reg_spec.max_episode_steps if reg_spec is not None and reg_spec.max_episode_steps is not None else 150
+            remaining = (max_steps - self.elapsed_steps).clamp(min=0).float()
+            reward = reward + info["success"].float() * remaining * per_step_peak
+            return reward
+
         reward = reaching_reward + info["is_item_grasped"]
 
-        # Lift back reward
-        place_reward = torch.exp(-2 * info["distance_to_rest_qpos"])
-        reward += place_reward * info["is_item_grasped"]
-        
         # Penalties
         reward -= 3 * info["robot_touching_table"].float()
         reward -= 1 * (~info["item_lifted"]).float()  # Encourage picking item fast
