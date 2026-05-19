@@ -1,1 +1,44 @@
-/Users/federico/.cache/huggingface/lerobot/calibration/robots/so_follower/so101_follower_arm.json
+{
+    "shoulder_pan": {
+        "id": 1,
+        "drive_mode": 0,
+        "homing_offset": 1658,
+        "range_min": 1050,
+        "range_max": 3071
+    },
+    "shoulder_lift": {
+        "id": 2,
+        "drive_mode": 0,
+        "homing_offset": -960,
+        "range_min": 900,
+        "range_max": 3256
+    },
+    "elbow_flex": {
+        "id": 3,
+        "drive_mode": 0,
+        "homing_offset": 1679,
+        "range_min": 911,
+        "range_max": 3127
+    },
+    "wrist_flex": {
+        "id": 4,
+        "drive_mode": 0,
+        "homing_offset": -779,
+        "range_min": 811,
+        "range_max": 3112
+    },
+    "wrist_roll": {
+        "id": 5,
+        "drive_mode": 0,
+        "homing_offset": 1366,
+        "range_min": 0,
+        "range_max": 4095
+    },
+    "gripper": {
+        "id": 6,
+        "drive_mode": 0,
+        "homing_offset": -1861,
+        "range_min": 1585,
+        "range_max": 3061
+    }
+}
