@@ -1198,7 +1198,7 @@ class Place(DefaultCameraEnv):
             elif env_id and env_id in REGISTERED_ENVS:
                 self._cached_pick_max_steps = int(REGISTERED_ENVS[env_id].max_episode_steps)
             else:
-                self._cached_pick_max_steps = 75  # PlaceCube default
+                self._cached_pick_max_steps = 100  # PlaceCube default
         return self._cached_pick_max_steps
 
     def _compute_dense_reward_pick_only(self, obs: Any, action: torch.Tensor, info: dict):
@@ -1225,7 +1225,7 @@ class Place(DefaultCameraEnv):
             + is_grasped
             + self.strong_grasp_coef * target_closure * is_grasped
         )
-        reward = reward - 3.0 * info["robot_touching_table"].float()
+        reward = reward - 0.5 * info["robot_touching_table"].float()
 
         # Terminal bonus: (max_steps - elapsed) · per_step_peak. With
         # per_step_peak = 1 + strong_grasp_coef the success branch yields the
@@ -1386,7 +1386,7 @@ class Place(DefaultCameraEnv):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 9
 
 
-@register_env("SO101PlaceCube-v1", max_episode_steps=75)
+@register_env("SO101PlaceCube-v1", max_episode_steps=100)
 class PlaceCube(Place):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="cube", **kwargs)

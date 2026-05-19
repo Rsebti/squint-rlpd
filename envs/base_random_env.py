@@ -138,10 +138,10 @@ class RandomizationConfig:
     # Centred to bracket realistic mount slop / hand-held re-fit error on the
     # SO101 wrist mount. Widened 2026-05 to cover the larger sim-to-real
     # extrinsic mismatch we observed at deploy.
-    wrist_camera_pos_noise: Sequence[float] = (0.001, 0.001, 0.001)
-    """Max position noise (x, y, z) in metres, sampled ONCE per episode and held constant. ±1 mm — tight, training-friendly range."""
-    wrist_camera_rot_noise: Sequence[float] = (np.deg2rad(1), np.deg2rad(1), np.deg2rad(1))
-    """Max rotation noise (roll, pitch, yaw) in radians, sampled ONCE per episode and held constant. ±1° — tight, training-friendly range."""
+    wrist_camera_pos_noise: Sequence[float] = (0.003, 0.003, 0.003)
+    """Max position noise (x, y, z) in metres, sampled ONCE per episode and held constant. ±3 mm — covers observed sim-to-real mount slop."""
+    wrist_camera_rot_noise: Sequence[float] = (np.deg2rad(2), np.deg2rad(2), np.deg2rad(2))
+    """Max rotation noise (roll, pitch, yaw) in radians, sampled ONCE per episode and held constant. ±2°."""
     wrist_camera_fov_noise: float = np.deg2rad(3)
     """Per-episode FOV noise (radians) around the base 71°. ±3° spans common phone-cam / USB-cam intrinsic variation."""
     wrist_camera_roll_discrete: bool = False

@@ -53,9 +53,9 @@ case "$N_DISTRACTORS" in
 esac
 
 # Episode length in control steps (1 step = 1/CONTROL_FREQ s = 100 ms @ 10 Hz).
-# Defaults to 7 s (70 steps). Override for pick-only (e.g. EP_STEPS=40 = 4 s).
+# Defaults to 10 s (100 steps). Override for pick-only (e.g. EP_STEPS=80 = 8 s).
 CONTROL_FREQ=10
-EP_STEPS="${EP_STEPS:-70}"
+EP_STEPS="${EP_STEPS:-100}"
 
 # Pick-only mode: when true, env's reward = grasp+stay-still-for-1s (no place).
 # Episode auto-terminates on success. False → full pick-and-place reward.

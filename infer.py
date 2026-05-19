@@ -196,10 +196,12 @@ class RealRobotAgent:
 # �═══════════════════════════════════════════════════════════════════════════╗
 # ║  Policy network — architecture must match the checkpoint exactly          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-# For 32×42 input the CNN flatten is 64 * 4 * 7 = 1792 (see padding math in
-# train_squint.py CNNEncoder, height==32 branch).
-CNN_FLATTEN_DIM = 1792
-RGB_PROJ_DIM = 75
+# For 36×64 input (16:9, matches 1920×1080 calibration), the CNN flatten is
+# 64 * 5 * 12 = 3840. Math: Conv(4, stride=2) -> Conv(4, stride=2) -> Conv(3,
+# stride=1) on 36×64 yields 17×31 -> 7×14 -> 5×12. Projection output kept at
+# 50 to match train_squint.py:362.
+CNN_FLATTEN_DIM = 3840
+RGB_PROJ_DIM = 50
 
 
 class CNNEncoder(nn.Module):
