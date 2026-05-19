@@ -55,6 +55,8 @@ fi
 # Optional pass-through overrides (only forwarded if set). The inner launcher
 # applies its own defaults for any that come through empty.
 export PICK_ONLY="${PICK_ONLY:-}"
+export SIDE_APPROACH="${SIDE_APPROACH:-}"
+export SIDE_APPROACH_OPEN_COEF="${SIDE_APPROACH_OPEN_COEF:-}"
 export EP_STEPS="${EP_STEPS:-}"
 export NUM_ENVS="${NUM_ENVS:-}"
 export NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-}"
@@ -118,6 +120,8 @@ tmux new-session -d -s squint \
      export TOTAL_TIMESTEPS='$TOTAL_TIMESTEPS' && \
      export WANDB_GROUP='$WANDB_GROUP' && \
      export PICK_ONLY='$PICK_ONLY' && \
+     export SIDE_APPROACH='$SIDE_APPROACH' && \
+     export SIDE_APPROACH_OPEN_COEF='$SIDE_APPROACH_OPEN_COEF' && \
      export EP_STEPS='$EP_STEPS' && \
      export NUM_ENVS='$NUM_ENVS' && \
      export NUM_EVAL_ENVS='$NUM_EVAL_ENVS' && \

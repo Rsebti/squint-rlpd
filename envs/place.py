@@ -265,6 +265,8 @@ class Place(DefaultCameraEnv):
         pick_only_reward: bool = False,
         pick_stable_speed_threshold: float = 0.01,
         pick_stable_duration_s: float = 1.0,
+        pick_side_approach: bool = False,
+        pick_side_approach_open_coef: float = 0.3,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -286,6 +288,19 @@ class Place(DefaultCameraEnv):
         self.pick_only_reward = bool(pick_only_reward)
         self.pick_stable_speed_threshold = float(pick_stable_speed_threshold)
         self.pick_stable_duration_s = float(pick_stable_duration_s)
+        # Side-approach curriculum (pick-only mode only). Forces the policy to
+        # land the FIXED finger on the cube first, keeping the moving finger
+        # fully open during approach. Reduces the failure mode where the policy
+        # arrives top-down with the moving finger pre-closed (works in sim, the
+        # cube physically holds the finger; fails on real where the finger taps
+        # the cube top). Once the fixed finger has touched, the reward switches
+        # to the normal grasp ladder for the rest of the episode.
+        self.pick_side_approach = bool(pick_side_approach)
+        self.pick_side_approach_open_coef = float(pick_side_approach_open_coef)
+        # Per-env sticky flag: True once fixed finger has touched the cube in
+        # the current episode. Reset on _initialize_episode. Lazy init on the
+        # first reward call (when device/num_envs are known).
+        self._fixed_finger_touched = None
         # Per-env consecutive-stable counter (pick-only mode). Init on _load_scene.
         self._grasp_slow_counter = None
         self._last_action = None
@@ -894,6 +909,9 @@ class Place(DefaultCameraEnv):
             # Clear the pick-only stable-grasp counter for the reset envs.
             if self._grasp_slow_counter is not None:
                 self._grasp_slow_counter[env_idx] = 0
+            # Clear the sticky "fixed finger has touched cube" flag.
+            if self._fixed_finger_touched is not None:
+                self._fixed_finger_touched[env_idx] = False
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1205,7 +1223,16 @@ class Place(DefaultCameraEnv):
         """Pick-only reward: reach → grasp → close-hard → stay still.
         Episode auto-terminates on success (grasped + slow for N consecutive
         control steps); terminal bonus replaces the remaining-step reward so
-        terminating early matches "continue at peak forever" total return."""
+        terminating early matches "continue at peak forever" total return.
+
+        Side-approach curriculum (pick_side_approach=True): before the FIXED
+        finger touches the cube, the reward is (reach + open_coef·gripper_open)
+        — no grasp / strong-grasp incentive — forcing the policy to approach
+        with the gripper open. Once the fixed finger has touched (sticky for
+        the rest of the episode), the reward switches to the normal grasp
+        ladder. open_coef defaults to 0.3 so pre-touch peak (~1.3) is below
+        the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5);
+        otherwise the policy would learn to hover and never touch."""
         tcp_to_item_dist = torch.linalg.norm(
             self.agent.tcp_pose.p - self.item.pose.p, axis=1
         )
@@ -1220,11 +1247,46 @@ class Place(DefaultCameraEnv):
             0.0, 1.0,
         )
 
-        reward = (
+        normal_reward = (
             (1 - is_grasped) * reach
             + is_grasped
             + self.strong_grasp_coef * target_closure * is_grasped
         )
+
+        if self.pick_side_approach:
+            N = is_grasped.shape[0]
+            if (self._fixed_finger_touched is None
+                    or self._fixed_finger_touched.shape[0] != N):
+                self._fixed_finger_touched = torch.zeros(
+                    N, dtype=torch.bool, device=self.device
+                )
+            # Fixed finger = SO101's gripper_link (jaw + tip). Check contact
+            # forces against the cube; threshold matches is_touching's 1e-2 N.
+            link_forces = self.scene.get_pairwise_contact_forces(
+                self.agent.finger1_link, self.item
+            )
+            tip_forces = self.scene.get_pairwise_contact_forces(
+                self.agent.finger1_tip, self.item
+            )
+            fixed_touch_now = (
+                (torch.linalg.norm(link_forces, axis=1) >= 1e-2)
+                | (torch.linalg.norm(tip_forces, axis=1) >= 1e-2)
+            )
+            # Sticky: once True in the episode, stays True until reset.
+            self._fixed_finger_touched = self._fixed_finger_touched | fixed_touch_now
+
+            gripper_open = torch.clamp(
+                (self.agent.robot.get_qpos()[:, -1] - gripper_min)
+                / (gripper_max - gripper_min),
+                0.0, 1.0,
+            )
+            pre_touch_reward = reach + self.pick_side_approach_open_coef * gripper_open
+            reward = torch.where(
+                self._fixed_finger_touched, normal_reward, pre_touch_reward
+            )
+        else:
+            reward = normal_reward
+
         reward = reward - 0.5 * info["robot_touching_table"].float()
 
         # Terminal bonus: (max_steps - elapsed) · per_step_peak. With

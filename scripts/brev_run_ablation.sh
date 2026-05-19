@@ -70,6 +70,20 @@ else
   echo "ERROR: PICK_ONLY must be 'true' or 'false', got $PICK_ONLY" >&2; exit 1
 fi
 
+# Side-approach curriculum (pick-only only). When true, the policy must land
+# the fixed finger on the cube first before the normal grasp ladder kicks in.
+SIDE_APPROACH="${SIDE_APPROACH:-false}"
+if [ "$SIDE_APPROACH" = "true" ]; then
+  SIDE_APPROACH_FLAG="--pick_side_approach"
+  SIDE_TAG="_side"
+elif [ "$SIDE_APPROACH" = "false" ]; then
+  SIDE_APPROACH_FLAG="--no-pick_side_approach"
+  SIDE_TAG=""
+else
+  echo "ERROR: SIDE_APPROACH must be 'true' or 'false', got $SIDE_APPROACH" >&2; exit 1
+fi
+SIDE_APPROACH_OPEN_COEF="${SIDE_APPROACH_OPEN_COEF:-0.3}"
+
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-36}"
@@ -88,7 +102,7 @@ BUFFER_SIZE="${BUFFER_SIZE:-4000000}"
 NUM_UPDATES="${NUM_UPDATES:-256}"
 BATCH_SIZE="${BATCH_SIZE:-768}"
 
-EXP_NAME="${EXP_NAME:-${STAGE}_${PICK_TAG}_sim${SIM_FREQ}_${LAT_TAG}}"
+EXP_NAME="${EXP_NAME:-${STAGE}_${PICK_TAG}${SIDE_TAG}_sim${SIM_FREQ}_${LAT_TAG}}"
 WANDB_PROJECT="${WANDB_PROJECT:-maniskill-so101}"
 WANDB_GROUP="${WANDB_GROUP:-SQUINT-ABLATION-${STAGE}-$(date +%Y%m%d-%H%M)}"
 
@@ -99,7 +113,7 @@ cd "${REPO_DIR:-$HOME/squint}"
 echo ""
 echo "================================================================"
 echo "  Ablation run: $EXP_NAME"
-echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)"
+echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)   side_approach=$SIDE_APPROACH (open_coef=$SIDE_APPROACH_OPEN_COEF)"
 echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS ($((EP_STEPS / CONTROL_FREQ)) s)"
 echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
@@ -134,7 +148,9 @@ python train_squint.py \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \
     --save_model \
-    $PICK_ONLY_FLAG
+    --pick_side_approach_open_coef="$SIDE_APPROACH_OPEN_COEF" \
+    $PICK_ONLY_FLAG \
+    $SIDE_APPROACH_FLAG
 
 echo ""
 echo "Done. Checkpoint at runs/$EXP_NAME/ckpt.pt"

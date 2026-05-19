@@ -113,6 +113,10 @@ class Args:
     """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Disabled by default — the penalty creates a 'do nothing' attractor for from-scratch training. Enable (e.g. 0.05-0.2) only for fine-tuning a working policy if eval shows jitter."""
     pick_only_reward: bool = False
     """If True, switch the Place env to pick-only mode: reward = reach → grasp → close hard; success = grasped + cube nearly stationary for 1 s. Episode auto-terminates on success. The full pick-and-place reward (z lift / xy-to-bowl / above-bin / release) is skipped entirely."""
+    pick_side_approach: bool = False
+    """Pick-only side-approach curriculum. Until the FIXED gripper finger touches the cube, the reward is (reach + open_coef·gripper_openness) only — no grasp/strong-grasp incentive — forcing the policy to approach with the gripper fully open and land the fixed finger first. Once touched (sticky for the episode), the normal grasp ladder kicks in. Reduces the failure mode where the policy arrives top-down with the moving finger pre-closed (works in sim, fails in real)."""
+    pick_side_approach_open_coef: float = 0.3
+    """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
     sim_freq: int = 300
     """Physics substep rate (Hz). Fixed at 300 = 3.33 ms/substep (higher physics fidelity)."""
     control_freq: int = 10
@@ -700,6 +704,10 @@ if __name__ == "__main__":
         eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         env_kwargs["pick_only_reward"] = args.pick_only_reward
         eval_env_kwargs["pick_only_reward"] = args.pick_only_reward
+        env_kwargs["pick_side_approach"] = args.pick_side_approach
+        eval_env_kwargs["pick_side_approach"] = args.pick_side_approach
+        env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
+        eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
     # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
     env_kwargs["sim_freq"] = args.sim_freq
     eval_env_kwargs["sim_freq"] = args.sim_freq
