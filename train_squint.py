@@ -123,14 +123,17 @@ class Args:
     """the observation output mode of the environment"""
     render_mode: Optional[str] = "all"
     """the rendering mode of the environment, could be rgb or all"""
-    render_height: int = 480
-    """sim wrist-camera render height (before downsampling)"""
+    render_height: int = 360
+    """sim wrist-camera render height (before downsampling). 360 matches the
+    real-camera 16:9 aspect (1920x1080 calibrated) at ¼ resolution."""
     render_width: int = 640
     """sim wrist-camera render width (before downsampling)"""
-    image_height: int = 32
+    image_height: int = 36
     """policy-input image height (after downsampling)"""
-    image_width: int = 42
-    """policy-input image width (after downsampling). 42 ≈ 32 * 4/3, preserves landscape aspect."""
+    image_width: int = 64
+    """policy-input image width (after downsampling). 64/36 = 16/9 EXACTLY,
+    and (640,360)→(64,36) is an exact ÷10 area-resize (uniform 10×10 pool).
+    Preserves the real-camera landscape aspect with no squash or aliasing seam."""
     apply_jitter: bool = True
     """applies color jitter to all input RGB observations (better for sim2real)"""
 
@@ -310,7 +313,10 @@ class CNNEncoder(nn.Module):
                 nn.Conv2d(64, 64, 3, stride=1, device=device), nn.ReLU(),
                 nn.Flatten()
             )
-        elif H == 32:
+        elif H in (32, 36):
+            # 32×42 (old 4:3) → flatten 1792.  36×64 (new 16:9) → flatten 3840.
+            # Same stride profile for both; the trailing Linear projection
+            # absorbs the size difference.
             self.conv = nn.Sequential(
                 nn.Conv2d(self.num_channels, 32, 4, stride=2, device=device), nn.ReLU(),
                 nn.Conv2d(32, 64, 4, stride=2, device=device), nn.ReLU(),
@@ -344,11 +350,14 @@ class CNNEncoder(nn.Module):
 class Projection(nn.Module):
     def __init__(self, n_obs, n_state, device=None):
         super().__init__()
-        # rgb_proj output bumped from 50 to 75 since the input resolution went
-        # from 16x16 to 32x42 — more pixels, slightly more capacity to compress.
-        self.repr_dim = 75 + 256
+        # rgb_proj output: kept at 50 even though we moved from 16x16 → 32x42 →
+        # 36x64 inputs. Empirically 50 trains better than 75 here: bigger
+        # bottleneck → more saturating Tanh units, weaker gradients, and ~25k
+        # extra downstream params (per SAC head ×4) that slow early
+        # convergence. The pressure of a tight bottleneck also helps sim2real.
+        self.repr_dim = 50 + 256
         self.rgb_proj = nn.Sequential(
-            nn.Linear(n_obs, 75, device=device), nn.LayerNorm(75, device=device), nn.Tanh(),
+            nn.Linear(n_obs, 50, device=device), nn.LayerNorm(50, device=device), nn.Tanh(),
         )
         self.state_proj = nn.Sequential(
             nn.Linear(n_state, 256, device=device), nn.LayerNorm(256, device=device), nn.ReLU(),
@@ -539,7 +548,7 @@ class Critic(nn.Module):
 class DeployAgent(nn.Module):
     """Standalone deployment wrapper for deploy.py file. Handles downsampling and inference."""
 
-    def __init__(self, sim_env, sample_obs, target_image_size=(32, 42), device=None):
+    def __init__(self, sim_env, sample_obs, target_image_size=(36, 64), device=None):
         super().__init__()
         self.device = device
         # Accept int (square) or (H, W).

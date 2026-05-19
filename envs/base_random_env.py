@@ -1144,17 +1144,20 @@ class WristCameraEnv(BaseRandomEnv):
     """
 
     # Base pose relative to gripper_link.
-    # NOTE: these translations are visual-calibration tweaks tuned at FOV=82°.
-    # Original mount values were (-0.0049, 0.0498, -0.0591). Two manual offsets
-    # were added to match the real arm's wrist-camera framing:
-    #   x: -0.0049 -> +0.0001 (+5 mm) — gripper sits at the LEFT of the image
-    #   z: -0.0591 -> -0.0691 (-10 mm) — slight forward push along optical axis
-    # If the measured real-camera FOV (coming tomorrow) differs from 82°,
-    # revisit these — the framing depends on both pose AND FOV. Revert to
-    # the originals if recalibrating from scratch.
-    WRIST_CAMERA_BASE_POS = (0.0001, 0.0498, -0.0691)
+    # NOTE: these translations are visual-calibration tweaks originally tuned
+    # at FOV=82° (vertical). The 2026-05-19 OpenCV calibration of the real
+    # camera sets the canonical fovy=76.92° + 16:9 aspect. Originals:
+    # (-0.0049, 0.0498, -0.0591).
+    #   x: -0.0049 -> -0.0006 (+4.3 mm) — gripper sits at the LEFT of the image
+    #   z: -0.0591 -> -0.0641 (-5 mm) — small forward push along optical axis
+    WRIST_CAMERA_BASE_POS = (-0.0006, 0.0498, -0.0641)
     WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-90), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
-    WRIST_CAMERA_FOV = np.deg2rad(82)  # vertical FOV (SAPIEN fovy); at 640x480 → ~109° horizontal.
+    # Vertical FOV (SAPIEN fovy) from 2026-05-19 OpenCV calibration:
+    # fy=679.89 px on 1080-row sensor → fovy = 2·atan(1080/2/679.89) ≈ 76.92°.
+    # At 16:9 aspect the implied horizontal FOV is 2·atan(tan(fovy/2)·16/9) ≈
+    # 109.38°, matching the measured 109.37°. Default sensor size is 16:9 too
+    # — see _default_sensor_configs below.
+    WRIST_CAMERA_FOV = np.deg2rad(76.92)
 
     def __init__(
         self,
@@ -1178,8 +1181,10 @@ class WristCameraEnv(BaseRandomEnv):
             CameraConfig(
                 "base_camera",
                 pose=sapien.Pose(),
+                # 16:9 to match the real camera (1920x1080 calibrated). 640x360
+                # is ¼ real res, cheap to render and the same aspect ratio.
                 width=640,
-                height=480,
+                height=360,
                 fov=self.WRIST_CAMERA_FOV + fov_noise,
                 near=0.01,
                 far=100,

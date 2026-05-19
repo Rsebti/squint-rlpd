@@ -92,8 +92,9 @@ CALIBRATION_ID = "so101_follower_arm"     # filename (no extension) of your cali
 CALIBRATION_DIR = Path(__file__).parent   # folder that holds the calibration .json
 
 # ── Contract constants (must match the training env) ───────────────────────
-IMAGE_H = 32             # CNN input height (landscape, matches sim wrist cam 4:3)
-IMAGE_W = 42             # CNN input width  (≈ 32 * 4/3, preserves 4:3 aspect)
+IMAGE_H = 36             # CNN input height (landscape, matches sim wrist cam 16:9)
+IMAGE_W = 64             # CNN input width  (64/36 = 16/9 EXACTLY; matches the
+                         # 2026-05-19 real-camera calibration at ÷30 of 1920×1080)
 N_COLORS = 6             # goal-color one-hot length
 CONTROL_HZ = 30          # sim sim_freq=300 / control_freq=30 (matches training)
 
@@ -248,9 +249,10 @@ class Actor(nn.Module):
 def preprocess_image(rgb):
     """Real camera frame (1,H,W,3) uint8 → (1, IMAGE_H, IMAGE_W, 3) uint8 tensor.
 
-    Real wrist cam delivers 640×480 (landscape), sim renders 640×480 too, both
-    are area-downsampled to (IMAGE_H, IMAGE_W) = (32, 42). No center-crop —
-    the 4:3 aspect is preserved end-to-end.
+    The real wrist camera was calibrated 2026-05-19 at 1920×1080 (16:9). The
+    sim renders 640×360 (¼ res, same 16:9). Both are area-downsampled to
+    (IMAGE_H, IMAGE_W) = (36, 64), an exact 16:9 grid. No center-crop —
+    the 16:9 aspect is preserved end-to-end with uniform pooling.
     """
     img = rgb[0].cpu().numpy() if torch.is_tensor(rgb) else np.asarray(rgb[0])
     img = cv2.resize(img, (IMAGE_W, IMAGE_H), interpolation=cv2.INTER_AREA)

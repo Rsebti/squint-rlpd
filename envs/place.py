@@ -28,15 +28,19 @@ from .robot.so101 import SO101
 # env.reset(options={"goal_color_idx": <int or 1-D tensor>}).
 COLOR_PALETTE = np.array(
     [
-        # High-saturation dark palette (HSV-S ≥ 0.85, V ≈ 0.5–0.8).
-        # Replaces the earlier pastel set whose low-saturation greens and
-        # purples (S ≈ 0.35) read as "white was mixed in".
-        [180/255,  30/255,  30/255],  # 0 red    S=0.83 V=0.71
-        [ 10/255,  25/255, 140/255],  # 1 blue   S=0.93 V=0.55
-        [ 25/255,  95/255,  30/255],  # 2 green  S=0.74 V=0.37
-        [200/255, 170/255,  20/255],  # 3 yellow S=0.90 V=0.78
-        [100/255,  20/255, 120/255],  # 4 purple S=0.83 V=0.47
-        [200/255,  80/255,  20/255],  # 5 orange S=0.90 V=0.78
+        # MEASURED from the real wrist camera (2026-05-19 median sample on each
+        # cube under nominal lighting). These are what the policy actually sees
+        # at deploy — not what looks "vivid" to a human eye. Note green is
+        # almost grey-green (S=0.19) and purple is a dark plum (S=0.43, V=0.38);
+        # the sim must reproduce these muted hues so the goal-color signal
+        # learned in training generalises to deploy.
+        #                                       (R,   G,   B)    S     V
+        [183/255,  77/255,  65/255],  # 0 red    (183, 77,  65)  0.65  0.72
+        [ 28/255,  65/255, 137/255],  # 1 blue   (28,  65, 137)  0.80  0.54
+        [ 84/255, 103/255,  83/255],  # 2 green  (84, 103,  83)  0.19  0.40
+        [214/255, 175/255,  95/255],  # 3 yellow (214,175,  95)  0.56  0.84
+        [ 88/255,  55/255,  97/255],  # 4 purple (88,  55,  97)  0.43  0.38
+        [222/255, 102/255,  68/255],  # 5 orange (222,102,  68)  0.69  0.87
     ],
     dtype=np.float32,
 )
@@ -174,16 +178,9 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     bin_half_size_y_range: Sequence[float] = (0.09 / 2, 0.11 / 2)
     bin_half_size_z_range: Sequence[float] = (0.024 / 2, 0.036 / 2)
 
-    # Split static / dynamic friction for the cubes. Real wood has a higher
-    # static coefficient than dynamic, so resist slipping initially then
-    # slide once moving. Bug-fix: the previous single `item_friction_range`
-    # used the same value for both, missing this asymmetry — the cube was
-    # slipping out of the fingers because dynamic == static was too low for
-    # a stable grasp.
-    # Split static / dynamic with real-wood asymmetry (static > dynamic) so the
-    # cube resists initial slip in the fingers, then slides smoothly once moving.
-    item_static_friction_range:  Sequence[float] = (1.2, 2.0)
-    item_dynamic_friction_range: Sequence[float] = (0.5, 1.0)
+    # Single friction range for the cubes — same value used for both static
+    # and dynamic friction. All friction values are strictly below 1.
+    item_friction_range: Sequence[float] = (0.2, 0.99)
     # Restitution for the cubes — disabled (fully inelastic, no bounce).
     item_restitution_range: Sequence[float] = (0.0, 0.0)
     # Mass range in kg. Sampled directly per env; the per-env density passed
@@ -192,7 +189,7 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     # range straddles it symmetrically.
     item_mass_range: Sequence[float] = (0.003, 0.006)
     # Friction + restitution for the bowl (was hardcoded 0.5 / 0.0).
-    bowl_friction_range: Sequence[float] = (0.3, 1.0)
+    bowl_friction_range: Sequence[float] = (0.3, 0.99)
     bowl_restitution_range: Sequence[float] = (0.0, 0.0)  # disabled (fully inelastic)
     # Friction for the table top. Fixed at 0.5 (no randomization) so contacts
     # average a clean 0.5 against cubes and the bowl.
@@ -202,15 +199,15 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     # Per-episode DR on the cube materials (goal + distractors). HSV-based so
     # the goal-conditioned policy still sees a recognisable hue — only
     # saturation and value (brightness) jitter; hue is locked.
-    item_sat_jitter: float = 0.10
-    """Half-range of per-episode multiplicative jitter on cube HSV saturation. ±10% by default."""
+    item_sat_jitter: float = 0.05
+    """Half-range of per-episode multiplicative jitter on cube HSV saturation. ±5% (tightened from ±10% — bigger jitters knock S down to ~0.65 on bad rolls, which is the threshold where the cube starts looking pastel/white-mixed)."""
     item_value_jitter: float = 0.10
     """Half-range of per-episode multiplicative jitter on cube HSV value (brightness). ±10% by default."""
-    item_roughness_range: Sequence[float] = (0.7, 0.95)  # was (0.35, 0.7) — more matte to match painted-wood look (kills specular highlights that read as "too light")
+    item_roughness_range: Sequence[float] = (0.7, 0.95)  # matte (painted-wood look)
     """Per-episode cube material roughness (matte <-> slightly glossy)."""
     item_metallic_range: Sequence[float] = (0.0, 0.15)
     """Per-episode cube material metallic (kept low — painted wood is non-metallic)."""
-    item_specular_range: Sequence[float] = (0.1, 0.4)  # was (0.3, 0.7) — lower specular so the cubes don't catch bright highlights that wash out the base color
+    item_specular_range: Sequence[float] = (0.0, 0.1)  # was (0.1, 0.4) — specular is the dominant "looks white" source: it's a white reflection layer on top of the diffuse base, and with the matte roughness it spreads across the cube face washing the colour out. Capped near zero now.
     """Per-episode cube material specular reflection strength."""
 
     # Per-episode DR on the bowl material. Bowl uses baked vertex colors;
@@ -387,8 +384,7 @@ class Place(DefaultCameraEnv):
         # in _initialize_episode based on the sampled goal_color_idx.
         colors = np.tile(COLOR_PALETTE[0], (self.num_envs, 1))  # default red
         cfg = self.domain_randomization_config
-        static_frictions  = np.ones(self.num_envs) * (cfg.item_static_friction_range[0]  + cfg.item_static_friction_range[1])  / 2
-        dynamic_frictions = np.ones(self.num_envs) * (cfg.item_dynamic_friction_range[0] + cfg.item_dynamic_friction_range[1]) / 2
+        frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
         restitutions = np.ones(self.num_envs) * (cfg.item_restitution_range[0] + cfg.item_restitution_range[1]) / 2
         mass_mid = (cfg.item_mass_range[0] + cfg.item_mass_range[1]) / 2
         masses = np.ones(self.num_envs) * mass_mid
@@ -409,13 +405,9 @@ class Place(DefaultCameraEnv):
                 )
                 # Cube color is now goal-conditioned: sampled from COLOR_PALETTE
                 # in _initialize_episode and applied as a material mutation.
-                static_frictions = self._batched_episode_rng.uniform(
-                    low=cfg.item_static_friction_range[0],
-                    high=cfg.item_static_friction_range[1],
-                )
-                dynamic_frictions = self._batched_episode_rng.uniform(
-                    low=cfg.item_dynamic_friction_range[0],
-                    high=cfg.item_dynamic_friction_range[1],
+                frictions = self._batched_episode_rng.uniform(
+                    low=cfg.item_friction_range[0],
+                    high=cfg.item_friction_range[1],
                 )
                 restitutions = self._batched_episode_rng.uniform(
                     low=cfg.item_restitution_range[0],
@@ -461,13 +453,9 @@ class Place(DefaultCameraEnv):
                 )
                 if cfg.randomize_item_color:
                     colors = self._batched_episode_rng.uniform(low=0, high=1, size=(3,))
-                static_frictions = self._batched_episode_rng.uniform(
-                    low=cfg.item_static_friction_range[0],
-                    high=cfg.item_static_friction_range[1],
-                )
-                dynamic_frictions = self._batched_episode_rng.uniform(
-                    low=cfg.item_dynamic_friction_range[0],
-                    high=cfg.item_dynamic_friction_range[1],
+                frictions = self._batched_episode_rng.uniform(
+                    low=cfg.item_friction_range[0],
+                    high=cfg.item_friction_range[1],
                 )
                 restitutions = self._batched_episode_rng.uniform(
                     low=cfg.item_restitution_range[0],
@@ -485,8 +473,7 @@ class Place(DefaultCameraEnv):
             self.item_dimensions = torch.stack([self.item_half_radii, self.item_half_radii, self.item_half_heights], dim=-1)
 
         colors = np.concatenate([colors, np.ones((self.num_envs, 1))], axis=-1)
-        self.item_static_frictions  = common.to_tensor(static_frictions,  device=self.device)
-        self.item_dynamic_frictions = common.to_tensor(dynamic_frictions, device=self.device)
+        self.item_frictions = common.to_tensor(frictions, device=self.device)
         self.item_restitutions = common.to_tensor(restitutions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
         self.item_masses = common.to_tensor(masses, device=self.device)
@@ -496,8 +483,8 @@ class Place(DefaultCameraEnv):
         for i in range(self.num_envs):
             builder = self.scene.create_actor_builder()
             material = sapien.pysapien.physx.PhysxMaterial(
-                static_friction=float(static_frictions[i]),
-                dynamic_friction=float(dynamic_frictions[i]),
+                static_friction=float(frictions[i]),
+                dynamic_friction=float(frictions[i]),
                 restitution=float(restitutions[i]),
             )
 
@@ -643,8 +630,9 @@ class Place(DefaultCameraEnv):
                     decomposition="coacd",
                     decomposition_params=dict(threshold=0.3, max_convex_hull=8),
                 )
-                # Visual from .ply alongside .obj — carries baked vertex
-                # colors from the original Gaussian splat's SH DC values.
+                # Visual from .ply alongside .obj. Bowl color is forced
+                # white by _randomize_bowl_tint (base_color + emission),
+                # which runs each reset.
                 ply_path = os.path.splitext(mesh_path)[0] + ".ply"
                 visual_path = ply_path if os.path.exists(ply_path) else mesh_path
                 builder.add_visual_from_file(
@@ -707,8 +695,8 @@ class Place(DefaultCameraEnv):
                 for i in range(self.num_envs):
                     builder = self.scene.create_actor_builder()
                     material = sapien.pysapien.physx.PhysxMaterial(
-                        static_friction=float(static_frictions[i]),
-                        dynamic_friction=float(dynamic_frictions[i]),
+                        static_friction=float(frictions[i]),
+                        dynamic_friction=float(frictions[i]),
                         restitution=0,
                     )
                     builder.add_box_collision(
@@ -814,38 +802,30 @@ class Place(DefaultCameraEnv):
                     part.material.set_specular(specular)
 
     def _randomize_bowl_tint(self, env_idx: torch.Tensor):
-        """Per-episode HSV tint on the bowl's render material. Hue ±h°,
-        saturation ±sj, value ±vj. PBR multiplies base_color * vertex_color,
-        so this tints the baked .ply colors without erasing them.
+        """Per-episode bowl tint. LOCKED to pure white — base_color is set to
+        white and a full-strength emission is applied so the bowl appears
+        bright white regardless of scene lighting. DR knobs ignored.
 
-        DR off: leaves base_color at (1,1,1) (no tint)."""
+        SAPIEN ignores PLY vertex colors, so the only color source is the
+        per-part material; setting base_color + emission here is sufficient."""
         if self.bin is None:
             return
-        cfg = self.domain_randomization_config
-        dr = self.domain_randomization
         env_idx_list = env_idx.tolist() if isinstance(env_idx, torch.Tensor) else list(env_idx)
+        base = [1.0, 1.0, 1.0, 1.0]
+        # Emission strength: 0=lit only, 1=full self-luminous. ~0.5 keeps the
+        # bowl bright white but lets scene shading still modulate it.
+        e = 0.4
+        emission = [e, e, e, 1.0]
         for i in env_idx_list:
             obj = self.bin._objs[i]
             entity = getattr(obj, "entity", obj)
             comp = entity.find_component_by_type(RenderBodyComponent)
             if comp is None:
                 continue
-            if dr:
-                rng = self._batched_episode_rng[i]
-                h_shift = rng.uniform(-cfg.bowl_hue_jitter_deg, cfg.bowl_hue_jitter_deg) / 360.0
-                s_scale = rng.uniform(1.0 - cfg.bowl_sat_jitter, 1.0 + cfg.bowl_sat_jitter)
-                v_scale = rng.uniform(1.0 - cfg.bowl_value_jitter, 1.0 + cfg.bowl_value_jitter)
-                # Build a near-white tint: HSV(h_shift, |h_shift|*sat_intensity, v_scale).
-                # The small saturation makes the tint visible as a hue cast
-                # without overpowering the baked vertex colors.
-                tint_sat = float(np.clip(abs(h_shift) * 6.0 * s_scale, 0.0, 0.25))
-                r, g, b = _hsv_to_rgb_np((h_shift % 1.0), tint_sat, float(np.clip(v_scale, 0.0, 1.5)))
-                rgba = [float(r), float(g), float(b), 1.0]
-            else:
-                rgba = [1.0, 1.0, 1.0, 1.0]
             for render_shape in comp.render_shapes:
                 for part in render_shape.parts:
-                    part.material.set_base_color(rgba)
+                    part.material.set_base_color(base)
+                    part.material.set_emission(emission)
 
     def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
         """Sample goal_color_idx (honoring options) and n_distractors distractor

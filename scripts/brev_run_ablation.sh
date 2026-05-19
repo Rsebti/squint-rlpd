@@ -58,13 +58,13 @@ EP_STEPS=70
 
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
-IMAGE_HEIGHT="${IMAGE_HEIGHT:-32}"
-IMAGE_WIDTH="${IMAGE_WIDTH:-42}"           # landscape, aspect-preserved
-# Sim render resolution. Default 96x128 (3:4 landscape, longest side=128).
-# Memory ≈ 25× less than the train_squint.py default 480x640. Aspect 0.75
-# is within 2% of the policy input aspect (32x42 = 0.76). Both dims are
-# multiples of 8 for GPU alignment.
-RENDER_HEIGHT="${RENDER_HEIGHT:-96}"
+IMAGE_HEIGHT="${IMAGE_HEIGHT:-36}"
+IMAGE_WIDTH="${IMAGE_WIDTH:-64}"           # exact 16:9 — matches real cam 1920x1080 (calibrated 2026-05-19)
+# Sim render resolution. Default 72x128 (9:16 landscape, longest side=128).
+# Memory ≈ 25× less than the train_squint.py default 360x640. Aspect 0.5625
+# is exact 9/16, EXACTLY matches the policy input aspect (36x64 = 0.5625).
+# 128→64 is ÷2 and 72→36 is ÷2 — uniform integer area-pool.
+RENDER_HEIGHT="${RENDER_HEIGHT:-72}"
 RENDER_WIDTH="${RENDER_WIDTH:-128}"
 
 # RTX 6000 96 GB knobs (mirror brev_run_rtx6000_32x32.sh).

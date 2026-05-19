@@ -41,14 +41,14 @@ CONFIG = {
     'seed': 1,
     'obs_mode': 'rgb',  # No segmentation — wrist camera RGB only.
     'render_mode': 'rgb_array',
-    # True wrist-camera resolution (matches the real lerobot Cv2Camera setup
-    # and the in-env sensor default in base_random_env.py: 640x480 landscape).
+    # Wrist-camera resolution. 16:9 to match the real camera calibrated on
+    # 2026-05-19 (1920x1080, fovy=76.92°); 640x360 = ¼ real, same aspect.
     'sensor_width': 640,
-    'sensor_height': 480,
-    # Third-person human render camera shares the same 4:3 landscape so the
+    'sensor_height': 360,
+    # Third-person human render camera shares the same 16:9 landscape so the
     # side-by-side tile cells stay aspect-matched.
     'render_camera_width': 640,
-    'render_camera_height': 480,
+    'render_camera_height': 360,
     'color_jitter': False,
     # None = no obs downsampling. Show the wrist obs at native sensor res so
     # the displayed quality matches the real camera's quality.
