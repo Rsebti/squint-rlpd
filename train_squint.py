@@ -308,7 +308,11 @@ class CNNEncoder(nn.Module):
         H, W = int(n_obs[0]), int(n_obs[1])
         self.image_size = H
 
-        if H == 64:
+        if H in (64, 84):
+            # Atari/DQN stride profile (8/4, 4/2, 3/1). Designed for 84x84
+            # inputs, also works fine at 64x... — the trailing Linear absorbs
+            # the width-dependent flatten size via the dummy-forward below.
+            # 84x150 → 7x15 → 64*7*15 = 6720 flatten.
             self.conv = nn.Sequential(
                 nn.Conv2d(self.num_channels, 32, 8, stride=4, device=device), nn.ReLU(),
                 nn.Conv2d(32, 64, 4, stride=2, device=device), nn.ReLU(),
