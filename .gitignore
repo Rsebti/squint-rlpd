@@ -100,3 +100,8 @@ Thumbs.db
 
 
 .claude/
+
+# Track everything under runs/ regardless of the *.pt, *.mp4, runs/, videos/
+# rules above. Order matters — these must come AFTER all the blockers.
+!runs/
+!runs/**
