@@ -110,6 +110,12 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate squint
 cd "${REPO_DIR:-$HOME/squint}"
 
+# Avoid fragmentation-induced OOM during color-jitter peaks at higher image
+# dims. The default caching allocator can fragment until a 100-300 MiB temp
+# can't find a contiguous slot even when GBs are free. Expandable segments
+# let the allocator grow contiguous regions on demand.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 echo ""
 echo "================================================================"
 echo "  Ablation run: $EXP_NAME"
