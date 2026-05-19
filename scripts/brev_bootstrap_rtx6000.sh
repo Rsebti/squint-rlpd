@@ -57,6 +57,7 @@ fi
 export PICK_ONLY="${PICK_ONLY:-}"
 export SIDE_APPROACH="${SIDE_APPROACH:-}"
 export SIDE_APPROACH_OPEN_COEF="${SIDE_APPROACH_OPEN_COEF:-}"
+export DROP_PENALTY_COEF="${DROP_PENALTY_COEF:-}"
 export EP_STEPS="${EP_STEPS:-}"
 export NUM_ENVS="${NUM_ENVS:-}"
 export NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-}"
@@ -122,6 +123,7 @@ tmux new-session -d -s squint \
      export PICK_ONLY='$PICK_ONLY' && \
      export SIDE_APPROACH='$SIDE_APPROACH' && \
      export SIDE_APPROACH_OPEN_COEF='$SIDE_APPROACH_OPEN_COEF' && \
+     export DROP_PENALTY_COEF='$DROP_PENALTY_COEF' && \
      export EP_STEPS='$EP_STEPS' && \
      export NUM_ENVS='$NUM_ENVS' && \
      export NUM_EVAL_ENVS='$NUM_EVAL_ENVS' && \

@@ -84,6 +84,10 @@ else
 fi
 SIDE_APPROACH_OPEN_COEF="${SIDE_APPROACH_OPEN_COEF:-0.3}"
 
+# Drop penalty (pick-only only). Penalty applied on every grasped→not-grasped
+# transition (each fumble). Default 0 = off; set e.g. 3.0 to push one-shot grasps.
+DROP_PENALTY_COEF="${DROP_PENALTY_COEF:-0.0}"
+
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-36}"
@@ -119,7 +123,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 echo ""
 echo "================================================================"
 echo "  Ablation run: $EXP_NAME"
-echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)   side_approach=$SIDE_APPROACH (open_coef=$SIDE_APPROACH_OPEN_COEF)"
+echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)   side_approach=$SIDE_APPROACH (open_coef=$SIDE_APPROACH_OPEN_COEF)   drop_penalty=$DROP_PENALTY_COEF"
 echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS ($((EP_STEPS / CONTROL_FREQ)) s)"
 echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
@@ -155,6 +159,7 @@ python train_squint.py \
     --wandb_group="$WANDB_GROUP" \
     --save_model \
     --pick_side_approach_open_coef="$SIDE_APPROACH_OPEN_COEF" \
+    --drop_penalty_coef="$DROP_PENALTY_COEF" \
     $PICK_ONLY_FLAG \
     $SIDE_APPROACH_FLAG
 

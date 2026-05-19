@@ -117,6 +117,8 @@ class Args:
     """Pick-only side-approach curriculum. Until the FIXED gripper finger touches the cube, the reward is (reach + open_coef·gripper_openness) only — no grasp/strong-grasp incentive — forcing the policy to approach with the gripper fully open and land the fixed finger first. Once touched (sticky for the episode), the normal grasp ladder kicks in. Reduces the failure mode where the policy arrives top-down with the moving finger pre-closed (works in sim, fails in real)."""
     pick_side_approach_open_coef: float = 0.3
     """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
+    drop_penalty_coef: float = 0.0
+    """Pick-only mode: penalty applied on every grasped→not-grasped transition (i.e., each drop). Default 0 = disabled; set e.g. 3.0 to penalise fumbles and push the policy to one-shot the grasp."""
     sim_freq: int = 100
     """Physics substep rate (Hz). Default 100 Hz = 10 ms/substep. Won the 2026-05-20 sim2real ablation vs 300 Hz."""
     control_freq: int = 10
@@ -713,6 +715,8 @@ if __name__ == "__main__":
         eval_env_kwargs["pick_side_approach"] = args.pick_side_approach
         env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
         eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
+        env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
+        eval_env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
     # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
     env_kwargs["sim_freq"] = args.sim_freq
     eval_env_kwargs["sim_freq"] = args.sim_freq

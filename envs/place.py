@@ -267,6 +267,7 @@ class Place(DefaultCameraEnv):
         pick_stable_duration_s: float = 1.0,
         pick_side_approach: bool = False,
         pick_side_approach_open_coef: float = 0.3,
+        drop_penalty_coef: float = 0.0,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -301,6 +302,14 @@ class Place(DefaultCameraEnv):
         # the current episode. Reset on _initialize_episode. Lazy init on the
         # first reward call (when device/num_envs are known).
         self._fixed_finger_touched = None
+        # Drop-penalty (pick-only mode only): -coef applied on each
+        # grasped→not-grasped transition. Pushes the policy to one-shot the
+        # grasp instead of fumbling and re-grasping. Disabled by default
+        # (coef=0); set to e.g. 3.0 to enable.
+        self.drop_penalty_coef = float(drop_penalty_coef)
+        # Per-env state for the drop-penalty: previous step's is_item_grasped.
+        # Lazy init on first reward call; reset to False on _initialize_episode.
+        self._prev_is_grasped = None
         # Per-env consecutive-stable counter (pick-only mode). Init on _load_scene.
         self._grasp_slow_counter = None
         self._last_action = None
@@ -912,6 +921,9 @@ class Place(DefaultCameraEnv):
             # Clear the sticky "fixed finger has touched cube" flag.
             if self._fixed_finger_touched is not None:
                 self._fixed_finger_touched[env_idx] = False
+            # Clear the prev-grasped flag used by the drop penalty.
+            if self._prev_is_grasped is not None:
+                self._prev_is_grasped[env_idx] = False
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1288,6 +1300,22 @@ class Place(DefaultCameraEnv):
             reward = normal_reward
 
         reward = reward - 0.5 * info["robot_touching_table"].float()
+
+        # Drop penalty: fires on every grasped → not-grasped transition
+        # (i.e., a fumble). Pushes the policy to one-shot the grasp instead
+        # of dropping and trying again. is_item_grasped here is the same
+        # bool used by the rest of the reward, so the transition detection
+        # is consistent with the grasp ladder above.
+        if self.drop_penalty_coef > 0.0:
+            is_grasped_bool = info["is_item_grasped"]
+            N = is_grasped_bool.shape[0]
+            if self._prev_is_grasped is None or self._prev_is_grasped.shape[0] != N:
+                self._prev_is_grasped = torch.zeros(
+                    N, dtype=torch.bool, device=self.device
+                )
+            drop_event = self._prev_is_grasped & (~is_grasped_bool)
+            reward = reward - self.drop_penalty_coef * drop_event.float()
+            self._prev_is_grasped = is_grasped_bool.clone()
 
         # Terminal bonus: (max_steps - elapsed) · per_step_peak. With
         # per_step_peak = 1 + strong_grasp_coef the success branch yields the
