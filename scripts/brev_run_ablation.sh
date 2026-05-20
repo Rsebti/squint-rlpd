@@ -88,6 +88,19 @@ SIDE_APPROACH_OPEN_COEF="${SIDE_APPROACH_OPEN_COEF:-0.3}"
 # transition (each fumble). Default 0 = off; set e.g. 3.0 to push one-shot grasps.
 DROP_PENALTY_COEF="${DROP_PENALTY_COEF:-0.0}"
 
+# Directional-light shadows in the DR env (envs/base_random_env.py:shadows).
+# Default ON — high sim2real lighting variation. Set SHADOWS=false to disable
+# (saves a lot of GPU shadow-map memory; the difference between "fits" and
+# "scene-init OOM" at 1024+ envs × 360x640 render).
+SHADOWS="${SHADOWS:-true}"
+if [ "$SHADOWS" = "true" ]; then
+  SHADOWS_FLAG="--env_shadows"
+elif [ "$SHADOWS" = "false" ]; then
+  SHADOWS_FLAG="--no-env_shadows"
+else
+  echo "ERROR: SHADOWS must be 'true' or 'false', got $SHADOWS" >&2; exit 1
+fi
+
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-36}"
@@ -123,7 +136,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 echo ""
 echo "================================================================"
 echo "  Ablation run: $EXP_NAME"
-echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)   side_approach=$SIDE_APPROACH (open_coef=$SIDE_APPROACH_OPEN_COEF)   drop_penalty=$DROP_PENALTY_COEF"
+echo "  mode=$PICK_TAG (pick_only_reward=$PICK_ONLY)   side_approach=$SIDE_APPROACH (open_coef=$SIDE_APPROACH_OPEN_COEF)   drop_penalty=$DROP_PENALTY_COEF   shadows=$SHADOWS"
 echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS ($((EP_STEPS / CONTROL_FREQ)) s)"
 echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
@@ -161,7 +174,8 @@ python train_squint.py \
     --pick_side_approach_open_coef="$SIDE_APPROACH_OPEN_COEF" \
     --drop_penalty_coef="$DROP_PENALTY_COEF" \
     $PICK_ONLY_FLAG \
-    $SIDE_APPROACH_FLAG
+    $SIDE_APPROACH_FLAG \
+    $SHADOWS_FLAG
 
 echo ""
 echo "Done. Checkpoint at runs/$EXP_NAME/ckpt.pt"

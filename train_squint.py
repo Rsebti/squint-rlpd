@@ -119,6 +119,8 @@ class Args:
     """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
     drop_penalty_coef: float = 0.0
     """Pick-only mode: penalty applied on every grasped→not-grasped transition (i.e., each drop). Default 0 = disabled; set e.g. 3.0 to penalise fumbles and push the policy to one-shot the grasp."""
+    env_shadows: bool = True
+    """If True, the DR env's directional lights cast shadows (extra GPU shadow-map allocation per env per directional light). Default True for max sim2real lighting variation. Set False when SAPIEN's parallel renderer can't allocate enough buffers (e.g. 1024+ envs × 360×640 render at default shader)."""
     sim_freq: int = 100
     """Physics substep rate (Hz). Default 100 Hz = 10 ms/substep. Won the 2026-05-20 sim2real ablation vs 300 Hz."""
     control_freq: int = 10
@@ -702,6 +704,14 @@ if __name__ == "__main__":
     if args.env_domain_randomization:
         env_kwargs["domain_randomization"] = True
         eval_env_kwargs["domain_randomization"] = True
+    # Forward the shadows toggle through the per-env DR config. Merged into
+    # the env's default RandomizationConfig (shadows=True) so passing
+    # {"shadows": False} disables shadow-map allocation on every directional
+    # light — the difference between "fits on 96 GB" and "GPU OOM on scene
+    # build" at 1024 envs × 160-360 render.
+    dr_cfg_override = {"shadows": args.env_shadows}
+    env_kwargs["domain_randomization_config"] = dr_cfg_override
+    eval_env_kwargs["domain_randomization_config"] = dr_cfg_override
     if "PlaceCube" in args.env_id:
         env_kwargs["n_distractors"] = args.n_distractors
         eval_env_kwargs["n_distractors"] = args.n_distractors
