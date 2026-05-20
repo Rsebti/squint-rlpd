@@ -262,6 +262,8 @@ class Place(DefaultCameraEnv):
         spawn_box_half_size=0.10,
         spawn_arc_center: Sequence[float] = (0.10, 0.0),
         spawn_arc_radius: float = 0.30,
+        spawn_y_clip: Optional[float] = 0.22,
+        spawn_x_min: Optional[float] = 0.12,
         spawn_stratified: bool = True,
         visualize_spawn_area: bool = False,
         visualize_robot_frame: bool = False,
@@ -364,6 +366,13 @@ class Place(DefaultCameraEnv):
         # extends in +x. The cube and bowl xy are both sampled in this region.
         self.spawn_arc_center = (float(spawn_arc_center[0]), float(spawn_arc_center[1]))
         self.spawn_arc_radius = float(spawn_arc_radius)
+        # Straight-line clips on the half-disk so cubes only spawn where the
+        # wrist camera can see them at the start pose (the policy is vision-only
+        # — a cube it can't see is never grasped). spawn_y_clip cuts the wide
+        # near-sides (|robot-frame y| ≤ clip); spawn_x_min cuts the near/back
+        # strip the camera barely sees (robot-frame x ≥ min). None disables.
+        self.spawn_y_clip = None if spawn_y_clip is None else float(spawn_y_clip)
+        self.spawn_x_min = None if spawn_x_min is None else float(spawn_x_min)
         # Latin-hypercube sampling across each batch of resetting envs in
         # (r², θ) space — gives uniform area coverage with no two envs in
         # the same r-band or θ-band per batch. With 2048 envs in a typical
@@ -816,15 +825,18 @@ class Place(DefaultCameraEnv):
             self._add_robot_frame_marker()
 
     def _add_spawn_area_marker(self, n_arc_segments: int = 24):
-        """Visual-only red half-disk outline marking the cube/bowl spawn region.
+        """Visual-only red outline of the cube/bowl spawn region (the half-disk
+        clipped by the straight-line edge cuts spawn_y_clip / spawn_x_min).
 
-        Anchored at `spawn_arc_center` (in robot frame). The curved boundary
-        (θ ∈ [-π/2, π/2]) is approximated by `n_arc_segments` thin chord
-        segments; the diameter (flat side, along y at x=0 in marker frame) is
-        a single thin box. Self-lit so it stays visible under the low-ambient
-        / dim-exposure tail of the lighting DR."""
+        Anchored at `spawn_arc_center` (robot frame). Drawn as: the front arc
+        (only the |y| ≤ spawn_y_clip portion, as chord segments), two straight
+        side lines at y = ±spawn_y_clip, and the near edge (a straight line at
+        x = spawn_x_min, or the half-disk diameter if no x clip). Self-lit so it
+        stays visible under the low-ambient / dim-exposure lighting DR."""
         cx, cy = self.spawn_arc_center
         R = self.spawn_arc_radius
+        yclip = self.spawn_y_clip
+        xmin = self.spawn_x_min
         wall_t = 0.003           # 3 mm border thickness
         wall_hz = 0.0025         # 5 mm total height
         red_mat = sapien.render.RenderMaterial(
@@ -833,33 +845,45 @@ class Place(DefaultCameraEnv):
         )
         builder = self.scene.create_actor_builder()
 
-        # Curved boundary: split θ ∈ [-π/2, +π/2] into N chord segments.
-        dtheta = np.pi / n_arc_segments
-        for i in range(n_arc_segments):
-            t0 = -np.pi / 2 + i * dtheta
-            t1 = t0 + dtheta
-            t_mid = 0.5 * (t0 + t1)
-            # Midpoint of the chord (on the arc itself; midpoint of the chord
-            # endpoints is slightly inside, but for small dtheta this offset
-            # is negligible — n=24 gives <0.3% error).
-            mx = float(R * np.cos(t_mid))
-            my = float(R * np.sin(t_mid))
-            # Tangent direction yaw = θ + π/2
-            yaw = float(t_mid + np.pi / 2)
-            # Chord length = 2R sin(Δθ/2)
-            half_chord = float(R * np.sin(dtheta / 2))
+        def add_segment(p0, p1):
+            """Add a thin box between two robot-frame points (absolute)."""
+            x0, y0 = p0[0] - cx, p0[1] - cy        # → marker-anchor frame
+            x1, y1 = p1[0] - cx, p1[1] - cy
+            L = float(np.hypot(x1 - x0, y1 - y0))
+            if L < 1e-4:
+                return
+            mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+            yaw = float(np.arctan2(y1 - y0, x1 - x0))
             builder.add_box_visual(
-                pose=sapien.Pose(p=[mx, my, wall_hz], q=euler2quat(0, 0, yaw)),
-                half_size=[half_chord, wall_t, wall_hz],
+                pose=sapien.Pose(p=[float(mx), float(my), wall_hz], q=euler2quat(0, 0, yaw)),
+                half_size=[L / 2 + wall_t, wall_t, wall_hz],
                 material=red_mat,
             )
 
-        # Flat side (diameter, along y at x=0 in marker frame), from y=-R to y=+R.
-        builder.add_box_visual(
-            pose=sapien.Pose(p=[0.0, 0.0, wall_hz]),
-            half_size=[wall_t, R, wall_hz],
-            material=red_mat,
-        )
+        # Arc half-angle visible after the |y| ≤ yclip cut.
+        if yclip is None or yclip >= R:
+            th = np.pi / 2
+        else:
+            th = float(np.arcsin(min(1.0, yclip / R)))
+        # Front arc (θ ∈ [-th, +th]) as chord segments.
+        ts = np.linspace(-th, th, n_arc_segments + 1)
+        for i in range(n_arc_segments):
+            p0 = (cx + R * np.cos(ts[i]),   cy + R * np.sin(ts[i]))
+            p1 = (cx + R * np.cos(ts[i + 1]), cy + R * np.sin(ts[i + 1]))
+            add_segment(p0, p1)
+
+        # y-extent of the arc endpoints (= yclip if clipped, else R).
+        ny = yclip if (yclip is not None and yclip < R) else R
+        # Near edge x: the x-clip line if it's forward of the centre, else the diameter at cx.
+        near_x = xmin if (xmin is not None and xmin > cx) else cx
+        # Arc endpoint x (where the arc meets y = ±ny).
+        arc_x = cx + R * np.cos(th)
+
+        # Two side lines at y = ±ny, from the near edge to the arc endpoints.
+        add_segment((near_x, cy + ny), (arc_x, cy + ny))
+        add_segment((near_x, cy - ny), (arc_x, cy - ny))
+        # Near edge (straight line) from -ny to +ny.
+        add_segment((near_x, cy - ny), (near_x, cy + ny))
 
         builder.initial_pose = sapien.Pose(p=[cx, cy, 0.0])
         self.spawn_area_marker = builder.build_kinematic(name="spawn_area_marker")
@@ -1073,23 +1097,51 @@ class Place(DefaultCameraEnv):
                 [arc_cx, arc_cy], device=self.device,
             )
 
+            # Straight-line clips, expressed as OFFSETS from the arc centre
+            # (absolute robot-frame y = arc_cy + off_y; x = arc_cx + off_x).
+            y_clip_off = None if self.spawn_y_clip is None else self.spawn_y_clip - arc_cy
+            x_min_off = None if self.spawn_x_min is None else self.spawn_x_min - arc_cx
+
+            def _in_clip(off: torch.Tensor) -> torch.Tensor:
+                ok = torch.ones(off.shape[0], dtype=torch.bool, device=self.device)
+                if y_clip_off is not None:
+                    ok &= off[:, 1].abs() <= y_clip_off
+                if x_min_off is not None:
+                    ok &= off[:, 0] >= x_min_off
+                return ok
+
             def sample_half_disk(n: int, stratified: bool) -> torch.Tensor:
                 """Sample n (x, y) offsets uniformly in the half-disk of radius
-                arc_R centred at the origin, with θ ∈ [-π/2, +π/2] (+x side).
-                When stratified, performs LHS in (r², θ) space across the n
-                samples for even area coverage."""
-                if stratified and n > 1:
-                    perm_r = torch.randperm(n, device=self.device)
-                    perm_t = torch.randperm(n, device=self.device)
-                    u_r = (perm_r.float() + torch.rand(n, device=self.device)) / n
-                    u_t = (perm_t.float() + torch.rand(n, device=self.device)) / n
-                else:
-                    u_r = torch.rand(n, device=self.device)
-                    u_t = torch.rand(n, device=self.device)
-                # u_r → r so that r² is uniform in [0, R²] (uniform 2D area density).
-                r = arc_R * torch.sqrt(u_r)
-                theta = -np.pi / 2 + u_t * np.pi
-                return torch.stack([r * torch.cos(theta), r * torch.sin(theta)], dim=-1)
+                arc_R centred at the origin, with θ ∈ [-π/2, +π/2] (+x side),
+                then clip to the visible band (|y| ≤ spawn_y_clip, x ≥
+                spawn_x_min) by rejection-resampling out-of-band points. When
+                stratified, performs LHS in (r², θ) space for even coverage; the
+                (rare) resampled points are uniform, so the LHS spread of the
+                in-band majority is preserved."""
+                def draw(m, strat):
+                    if strat and m > 1:
+                        perm_r = torch.randperm(m, device=self.device)
+                        perm_t = torch.randperm(m, device=self.device)
+                        u_r = (perm_r.float() + torch.rand(m, device=self.device)) / m
+                        u_t = (perm_t.float() + torch.rand(m, device=self.device)) / m
+                    else:
+                        u_r = torch.rand(m, device=self.device)
+                        u_t = torch.rand(m, device=self.device)
+                    r = arc_R * torch.sqrt(u_r)              # r² uniform → uniform area
+                    theta = -np.pi / 2 + u_t * np.pi
+                    return torch.stack([r * torch.cos(theta), r * torch.sin(theta)], dim=-1)
+
+                off = draw(n, stratified)
+                if y_clip_off is None and x_min_off is None:
+                    return off
+                # Rejection-resample out-of-band points (uniform) until valid.
+                for _ in range(50):
+                    bad = ~_in_clip(off)
+                    nb = int(bad.sum().item())
+                    if nb == 0:
+                        break
+                    off[bad] = draw(nb, False)
+                return off
 
             item_xy_offset = sample_half_disk(b, self.spawn_stratified)
             # Bowl: same half-disk. Sampled uniformly (no LHS — keeping the

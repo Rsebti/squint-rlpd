@@ -229,9 +229,11 @@ class SO101(BaseAgent):
         ),
         start=Keyframe(
             qpos=np.array(
-                [-2.242 * np.pi / 180, -80.791 * np.pi / 180, 36.747 * np.pi / 180,
+                [0.0, -80.791 * np.pi / 180, 36.747 * np.pi / 180,
                  86.901 * np.pi / 180, -82.154 * np.pi / 180, 120 * np.pi / 180]
-            ),  # Hand-set real-robot pose (servo deg from calibrated mid). Gripper fully open (URDF upper = 120°).
+            ),  # Hand-set real-robot pose. pan centred at 0 (was -2.242°) to
+                # symmetrize the wrist-camera footprint over the spawn zone.
+                # Gripper fully open (URDF upper = 120°).
             pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
         ),
         zero=Keyframe(

@@ -213,9 +213,12 @@ GRASP_EMPTY_BELOW_DEG = -5.0      # after closing, if measured gripper > this it
                                   # stalled on an object = grasped; ≤ this = empty.
                                   # Measured: cube stalls at ~-0.5° sim, full-close
                                   # target is -10°, so -5° is the midpoint.
-GRASP_RETREAT_S = 2.0             # s of approach commands to replay in reverse on a miss
-GRASP_MAX_RETRIES = 3             # reopen+retreat+rerun attempts before giving up
-GRASP_HOLD_S = 2.0                # s to hold the closed grasp before lifting
+GRASP_MAX_RETRIES = 3             # back-off + retry attempts before giving up
+GRASP_RETREAT_UP_M = 0.10         # on a miss, IK the TCP this far UP …
+GRASP_RETREAT_BACK_M = 0.05       # … and this far BACK toward the base (to view where the
+                                  # cube went), then rerun the policy
+GRASP_RETREAT_SPEED = 0.20        # m/s the TCP eases through the back-off move
+GRASP_HOLD_S = 0.0                # s to hold the closed grasp before lifting (0 = lift immediately)
 GRASP_LIFT_M = 0.05               # m to raise the TCP (cube) after a confirmed grasp
 GRASP_LIFT_S = 1.5                # s allotted to complete the lift before ending the episode
 
@@ -482,29 +485,114 @@ TABLE_WHITE_SAT_THRESH = 60
 TABLE_HUE_TOL = 14
 TABLE_DETECT_W = 320          # detection runs at this width (fast); mask is then
                               # applied and the result downsampled to the CNN size
+LOWER_TABLE_Y = 0.45          # the robot/camera are fixed to the table, so the LOWER part of
+                              # the frame is always table (+ the gripper rising from the bottom
+                              # edge), never background. Force everything below this fraction to
+                              # count as table so the background mask can't grey the gripper.
 LAST_MASKED_VIZ = None        # last masked detection-res RGB frame, for the viewer
 
+# Non-goal cube masking: on top of the table mask, grey ONLY the pixels that
+# match the OTHER cubes' colours (the goal cube is never touched, so all of its
+# faces — including dark ones — survive). A pixel is a non-goal cube if it's
+# saturated and its NEAREST palette colour is one of the non-goal colours. The
+# table, gripper, bowl and the goal cube are all left as-is.
+COLOR_DISTRACTOR_MASK = True  # grey non-goal cube colours on top of the table mask
+DISTRACTOR_SAT_MIN = 80       # a pixel is a coloured cube only if S ≥ this (0–255);
+                              # the table is desaturated and stays below it
+NONGOAL_V_MIN = 35            # ...AND bright enough (V ≥ this), to drop the near-black gripper.
+                              # Kept low so a cube that falls into shadow / vignette when the
+                              # gripper closes in off-centre (V can drop to ~50) is still masked.
+                              # The gripper's near-black S=255 artifact is now excluded mainly by
+                              # the (hue,sat) COLOR_DIST_TOL test, so this floor only needs to clear
+                              # true black (V≈3) with margin.
+COLOR_DIST_TOL = 26           # max (hue,sat) distance to a cube centroid to count the pixel as
+                              # that cube (so random saturated stuff isn't greyed). Combined
+                              # distance: sqrt(huedist^2 + (SAT_DIST_W*satdist_scaled)^2).
+SAT_DIST_W = 1.0              # weight on saturation in the colour classifier. Saturation is what
+                              # separates hue-adjacent cubes (blue vs purple) when shadow/close-
+                              # range drift their hues together; raise to lean harder on it.
+LOW_SAT_FLOOR = 45            # connectivity grow floor: from a confident bright non-goal face,
+                              # absorb TOUCHING coloured pixels down to this saturation (the
+                              # cube's darker faces). Kept above the table's saturation so the
+                              # grow can't bleed into the table; the goal cube is excluded too.
+MASK_GROW_PX = 3              # grow the greyed non-goal regions this many px (detect-res) to
+                              # cover their borders
+GOAL_PROTECT_FRAC = 0.5       # no-mask halo around the goal cube, as a fraction of the cube's
+                              # width — keeps the gripper↔cube gap from being masked at grasp
+# Aggressive close-range mode: once the gripper tip is below MASK_AGG_Z above the
+# table, the goal cube sits between the fingers (centre-bottom of the wrist view).
+# We then identify the goal by POSITION (the central blob) — confirmed it colour-
+# matches the goal — and mask EVERY other saturated cube blob wholesale, instead of
+# per-pixel colour-classifying distractors (which is fragile in shadow / at edges).
+MASK_AGGRESSIVE = False        # set per-step by set_mask_aggressive() from the tip height
+MASK_AGG_Z = 0.08              # tip height above table (m) below which aggressive mode is on
+AGG_CUBE_TOL = 45              # looser (hue,sat) distance for "is this pixel any cube" in aggressive
+                               # mode — catches shadow-shifted distractors while excluding the
+                               # near-black gripper (whose random hue stays far from every centroid)
+AGG_MIN_AREA = 25              # ignore blobs smaller than this many detect-res px (specks/noise)
+AGG_GOAL_FRAC = 0.40           # central blob must have ≥ this fraction of pixels classed as the
+                               # goal colour to confirm it's the goal (else fall back to colour mask)
+AGG_ZONE_Y = 0.72             # vertical position of the grasp point (between the fingers), as a
+                              # fraction of image height — the central goal blob sits near here
+# OpenCV hues (0–179) of the COLOR_PALETTE in envs/place.py, index = goal_color.
+#                0 red 1 blue 2 green 3 yellow 4 purple 5 orange
+GOAL_HUE_CV = [4, 112, 64, 26, 149, 8]
+# OpenCV saturations (0–255) of the same palette, used together with hue to tell
+# hue-adjacent cubes apart (blue↔purple). Calibration overrides these per rig.
+GOAL_SAT_CV = [249, 253, 242, 242, 235, 246]
+# Optional measured override (final_utils/calib_colors.py) — real cube hue+sat under
+# the actual camera/lighting beat the palette-derived defaults above.
+HUE_CALIB_PATH = Path(__file__).parent / "hue_calib.json"
 
-def mask_background_to_table(rgb_img):
-    """Detect the table and paint everything outside its convex hull with the
-    table's mean colour. Operates in RGB in-place-safe. Returns the masked RGB
-    image (same HxW), or the original frame untouched if detection fails.
 
-    Seeds from the bottom-center strip every frame (the downward-looking wrist
-    camera keeps the table in the lower FOV across the trajectory), then keeps
-    the connected component CONTAINING that seed point so a bright curtain that
-    is larger than the table can't hijack the detection."""
+def load_hue_calib():
+    """If hue_calib.json exists, override GOAL_HUE_CV / GOAL_SAT_CV with measured values."""
+    global GOAL_HUE_CV, GOAL_SAT_CV
+    if HUE_CALIB_PATH.exists():
+        d = json.loads(HUE_CALIB_PATH.read_text())
+        GOAL_HUE_CV = [int(round(h)) for h in d["hues"]]
+        if "sat" in d:
+            GOAL_SAT_CV = [int(round(s)) for s in d["sat"]]
+        print(f"Loaded colour calib (measured): hue={GOAL_HUE_CV} sat={GOAL_SAT_CV}")
+        return True
+    return False
+
+
+def set_mask_aggressive(qpos):
+    """Flip the close-range aggressive mask on when the FK gripper tip drops below
+    MASK_AGG_Z above the (reach-corrected) table. Call once per control step before
+    preprocess_image(); mask_background_to_table() reads the MASK_AGGRESSIVE global."""
+    global MASK_AGGRESSIVE
+    tcp = tcp_pos(qpos)
+    r = float(np.hypot(tcp[0], tcp[1]))
+    z_table = TABLE_Z_A * r + TABLE_Z_B
+    MASK_AGGRESSIVE = (float(tcp[2]) - z_table) < MASK_AGG_Z
+    return MASK_AGGRESSIVE
+
+
+def mask_background_to_table(rgb_img, goal_color=None, aggressive=None):
+    """Two-step mask, in RGB:
+
+    1. Table mask — detect the table (connected region from a bottom-centre seed)
+       and paint everything OUTSIDE its convex hull with the table's mean colour
+       (greys the room/wall/desk behind the table). Everything ON the table stays.
+    2. Non-goal cubes — if `goal_color` is given and COLOR_DISTRACTOR_MASK is on,
+       grey the pixels that match the OTHER cubes' colours (saturated AND nearest
+       palette colour ≠ goal). The GOAL cube is never targeted, so all of its
+       faces survive; the table, gripper and bowl are left as-is.
+
+    Returns the masked RGB image, or the original frame if detection fails.
+    """
     h, w = rgb_img.shape[:2]
     hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
     H, S, V = cv2.split(hsv)
 
     y_lo = int(0.55 * h)
     x_lo, x_hi = int(0.30 * w), int(0.70 * w)
-    strip_S = S[y_lo:, x_lo:x_hi]
-    if strip_S.size == 0:
+    if S[y_lo:, x_lo:x_hi].size == 0:
         return rgb_img
     sH = int(np.median(H[y_lo:, x_lo:x_hi]))
-    sS = int(np.median(strip_S))
+    sS = int(np.median(S[y_lo:, x_lo:x_hi]))
     sV = int(np.median(V[y_lo:, x_lo:x_hi]))
     seed_pt = (w // 2, int(0.80 * h))
 
@@ -528,11 +616,8 @@ def mask_background_to_table(rgb_img):
     num, labels, stats, _ = cv2.connectedComponentsWithStats(table_u8, 8)
     if num <= 1:
         return rgb_img
-    sx = int(np.clip(seed_pt[0], 0, w - 1))
-    sy = int(np.clip(seed_pt[1], 0, h - 1))
-    seed_label = int(labels[sy, sx])
-    if seed_label == 0:
-        seed_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    sx, sy = int(np.clip(seed_pt[0], 0, w - 1)), int(np.clip(seed_pt[1], 0, h - 1))
+    seed_label = int(labels[sy, sx]) or (1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA])))
     if stats[seed_label, cv2.CC_STAT_AREA] < 0.05 * H.size:
         return rgb_img
     table_mask = (labels == seed_label).astype(np.uint8) * 255
@@ -543,15 +628,120 @@ def mask_background_to_table(rgb_img):
     hull = cv2.convexHull(np.concatenate(contours))
     hull_mask = np.zeros_like(table_mask)
     cv2.drawContours(hull_mask, [hull], -1, 255, thickness=cv2.FILLED)
+    hull_mask[int(LOWER_TABLE_Y * h):, :] = 255     # lower band is always table (gripper-safe)
 
     mean_rgb = rgb_img[table_mask > 0].reshape(-1, 3).mean(axis=0)
     out = rgb_img.copy()
-    out[hull_mask == 0] = mean_rgb
+    # 1. Background → ONE clean region (smoothed, hole-free), filled with the table mean.
+    bg = cv2.morphologyEx((hull_mask == 0).astype(np.uint8) * 255, cv2.MORPH_CLOSE, kern, iterations=2)
+    out[bg > 0] = mean_rgb
+
+    # 2. Mask the non-goal cubes (never the goal cube), absorbing their darker
+    #    faces by growing from each confident bright face into the touching,
+    #    same-ish-colour pixels, then INPAINTING from neighbouring pixels so each
+    #    filled patch takes the LOCAL table colour, not the global mean.
+    if goal_color is not None and COLOR_DISTRACTOR_MASK:
+        gi = int(goal_color)
+        # Classify each pixel by its nearest cube in (hue, saturation) space, NOT hue
+        # alone — hue-adjacent cubes (blue↔purple) drift together under shadow/close
+        # range, but their saturations stay apart, so sat is what keeps them separate.
+        # Saturation (0–255) is rescaled to hue units (0–180) so the two are comparable.
+        Hi = H.astype(np.float32)
+        Si = S.astype(np.float32)
+        sat_scale = 180.0 / 255.0
+        hue_d = np.stack(
+            [np.minimum(np.abs(Hi - hc), 180 - np.abs(Hi - hc)) for hc in GOAL_HUE_CV], axis=0)
+        sat_d = np.stack([np.abs(Si - sc) for sc in GOAL_SAT_CV], axis=0) * sat_scale
+        dstack = np.sqrt(hue_d ** 2 + (SAT_DIST_W * sat_d) ** 2)
+        nearest = dstack.argmin(axis=0)
+        dmin = dstack.min(axis=0)
+
+        # ── Aggressive close-range mode ─────────────────────────────────────────
+        # Once the gripper is closing in, the goal cube sits between the fingers
+        # (centre-bottom). Identify it by POSITION (the central blob), confirm it is
+        # the goal colour, then mask EVERY other saturated cube blob wholesale — no
+        # fragile per-pixel colour test on shadowed / frame-edge distractors.
+        agg = MASK_AGGRESSIVE if aggressive is None else aggressive
+        if agg:
+            # All cube material (any colour): saturated, bright, near SOME cube centroid
+            # — so the near-black gripper (random hue, far from every centroid) and the
+            # desaturated table are excluded.
+            cube = (S >= DISTRACTOR_SAT_MIN) & (V >= NONGOAL_V_MIN) & (dmin <= AGG_CUBE_TOL)
+            cube_u8 = cv2.morphologyEx(cube.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            # The goal cube = the GOAL-COLOURED blob nearest the grasp point (between the
+            # fingers). Pick among goal-coloured blobs so a stray highlight that misreads as
+            # another colour can't preempt the real goal cube.
+            goalpx = cv2.morphologyEx(((cube_u8 > 0) & (nearest == gi)).astype(np.uint8) * 255,
+                                      cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            nG, labG, statsG, centsG = cv2.connectedComponentsWithStats(goalpx, 8)
+            gpt = (0.5 * w, AGG_ZONE_Y * h)
+            best, bestd = 0, 1e18
+            for L in range(1, nG):
+                if statsG[L, cv2.CC_STAT_AREA] < AGG_MIN_AREA:
+                    continue
+                cx, cy = centsG[L]
+                dd = (cx - gpt[0]) ** 2 + (cy - gpt[1]) ** 2
+                if dd < bestd:
+                    bestd, best = dd, L
+            if best > 0:                              # a central goal cube is present → aggressive
+                central = labG == best
+                # Protect the goal cube + a halo (covers its own faces/highlights that may
+                # misread as another colour) so we never paint a hole in the goal.
+                area = int(central.sum())
+                r_goal = (area / np.pi) ** 0.5
+                pr = max(2, int(round(GOAL_PROTECT_FRAC * 2 * r_goal)))
+                gk = cv2.dilate(central.astype(np.uint8) * 255,
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pr + 1, 2 * pr + 1)))
+                # Mask EVERY cube pixel outside the goal-cube region — whole distractor blobs,
+                # regardless of colour/shadow, with no fragile per-pixel test.
+                ng_u8 = cube_u8.copy()
+                if MASK_GROW_PX > 0:
+                    r = int(MASK_GROW_PX)
+                    ng_u8 = cv2.dilate(ng_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+                ng_u8[gk > 0] = 0
+                if ng_u8.any():
+                    out = cv2.inpaint(out, ng_u8, 4, cv2.INPAINT_TELEA)
+                return out
+            # no central goal cube → fall back to the colour mask below
+
+        # Confident bright non-goal faces = seeds (bright enough to exclude the gripper).
+        seed = (S >= DISTRACTOR_SAT_MIN) & (V >= NONGOAL_V_MIN) & (nearest != gi) & (dmin <= COLOR_DIST_TOL)
+        # Candidate cube material: any coloured non-goal pixel down to a floor kept
+        # above the table's saturation (so it can't bleed into the table) and above
+        # near-black (so the gripper is excluded); the goal cube is excluded too.
+        floor = max(LOW_SAT_FLOOR, sS + 20)
+        cand = (S >= floor) & (V >= NONGOAL_V_MIN) & (nearest != gi)
+        cand_u8 = cv2.morphologyEx(cand.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        n_lab, lab = cv2.connectedComponents(cand_u8, 8)
+        keep_labels = np.unique(lab[seed & (lab > 0)])          # components touching a seed
+        ng = np.isin(lab, keep_labels) & (lab > 0)
+        ng_u8 = ng.astype(np.uint8) * 255
+        if MASK_GROW_PX > 0:
+            r = int(MASK_GROW_PX)
+            ng_u8 = cv2.dilate(ng_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+        # No-mask zone around the goal cube: protect the cube + a halo (~GOAL_PROTECT_FRAC
+        # of its width) so the gripper↔cube gap isn't masked as the grasp closes in.
+        goal_keep = (S >= DISTRACTOR_SAT_MIN) & (V >= NONGOAL_V_MIN) & (nearest == gi) & (dstack[gi] <= COLOR_DIST_TOL)
+        gk = cv2.morphologyEx(goal_keep.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        area = int((gk > 0).sum())
+        if area > 0:
+            r_goal = (area / np.pi) ** 0.5                # equivalent cube radius (px)
+            pr = max(1, int(round(GOAL_PROTECT_FRAC * 2 * r_goal)))
+            gk = cv2.dilate(gk, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pr + 1, 2 * pr + 1)))
+        # Protect only the gripper↔goal gap (boundary/grow pixels), NEVER re-reveal a
+        # confident non-goal cube face that the halo happens to overlap — the policy is
+        # colour-blind, so an un-masked neighbour cube (e.g. purple next to blue) would
+        # capture it. Keep the non-goal seeds masked even inside the protect zone.
+        seed_u8 = cv2.dilate(seed.astype(np.uint8) * 255,
+                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        ng_u8[(gk > 0) & (seed_u8 == 0)] = 0
+        if ng_u8.any():                                  # inpaint from neighbouring table pixels
+            out = cv2.inpaint(out, ng_u8, 4, cv2.INPAINT_TELEA)
     return out
 
 
 # ── Observation / action helpers ────────────────────────────────────────────
-def preprocess_image(rgb):
+def preprocess_image(rgb, goal_color=None):
     """Real camera frame (1,H,W,3) uint8 → (1, IMAGE_H, IMAGE_W, 3) uint8 tensor.
 
     The real wrist camera was calibrated 2026-05-19 at 1920×1080 (16:9). The
@@ -569,7 +759,7 @@ def preprocess_image(rgb):
         det_w = TABLE_DETECT_W
         det_h = int(round(det_w * img.shape[0] / img.shape[1]))
         det = cv2.resize(img, (det_w, det_h), interpolation=cv2.INTER_AREA)
-        det = mask_background_to_table(det)
+        det = mask_background_to_table(det, goal_color)
         LAST_MASKED_VIZ = det           # full detection-res masked frame, for the viewer
         img = det
     else:
@@ -681,11 +871,11 @@ def back_nudge_joint_target(qpos, target_qpos, nudge_m, target_z):
 def main():
     # Declared up-front so reads in argparse defaults compose with later writes.
     global ROBOT_PORT, CAMERA_INDEX, IMAGE_H, IMAGE_W, CNN_FLATTEN_DIM, RGB_PROJ_DIM
-    global TABLE_MASK_ENABLED, TABLE_SAT_BAND, TABLE_VAL_BAND, TABLE_WHITE_SAT_THRESH
+    global TABLE_MASK_ENABLED, TABLE_SAT_BAND, TABLE_VAL_BAND, TABLE_WHITE_SAT_THRESH, COLOR_DISTRACTOR_MASK
     global GRIPPER_SNAP_ENABLED, GRIPPER_SNAP_BELOW_DEG, GRIPPER_FULL_CLOSE_DEG, GRIPPER_LATCH_ACTION
     global GRASP_ENABLED, GRASP_GATE_Z, GRASP_GATE_Z_SLOPE, GRASP_WAIT_S, GRASP_CLOSE_S, GRASP_EMPTY_BELOW_DEG
     global GRASP_GATE_STALL, GRASP_STALL_S, GRASP_STALL_EPS, GRASP_ENGAGE_Z
-    global GRASP_RETREAT_S, GRASP_MAX_RETRIES, GRASP_CLOSE_DEG, GRASP_NUDGE_M, GRASP_NUDGE_Z, GRASP_NUDGE_SETTLE_S
+    global GRASP_MAX_RETRIES, GRASP_CLOSE_DEG, GRASP_NUDGE_M, GRASP_NUDGE_Z, GRASP_NUDGE_SETTLE_S
     global GRASP_HOLD_S, GRASP_LIFT_M, GRASP_LIFT_S
     global TABLE_Z_A, TABLE_Z_B
 
@@ -709,6 +899,10 @@ def main():
                    help=f"V4L2 device index (default: {CAMERA_INDEX}; see `v4l2-ctl --list-devices`)")
     p.add_argument("--table_mask", action=argparse.BooleanOptionalAction, default=True,
                    help="mask the background to the table's mean colour before the CNN (default ON)")
+    p.add_argument("--distractor_mask", action=argparse.BooleanOptionalAction, default=COLOR_DISTRACTOR_MASK,
+                   help="grey the non-goal cubes (and the aggressive close-range mask) on top of the table "
+                        f"mask (default {'ON' if COLOR_DISTRACTOR_MASK else 'OFF'}; --no-distractor_mask keeps "
+                        "ALL cubes visible while still masking the background)")
     p.add_argument("--table_val_band", type=int, default=TABLE_VAL_BAND,
                    help=f"white-table value band; LOWER excludes dimmer background like curtains (default {TABLE_VAL_BAND})")
     p.add_argument("--table_sat_band", type=int, default=TABLE_SAT_BAND,
@@ -753,8 +947,6 @@ def main():
                    help=f"time allotted for the gripper to close + settle before verifying (default {GRASP_CLOSE_S}s)")
     p.add_argument("--grasp_empty_below_deg", type=float, default=GRASP_EMPTY_BELOW_DEG,
                    help=f"after closing, measured gripper > this = stalled on object = grasped; ≤ this = empty (default {GRASP_EMPTY_BELOW_DEG})")
-    p.add_argument("--grasp_retreat_s", type=float, default=GRASP_RETREAT_S,
-                   help=f"on a miss, replay this many seconds of approach commands in reverse to retreat (default {GRASP_RETREAT_S}s)")
     p.add_argument("--grasp_max_retries", type=int, default=GRASP_MAX_RETRIES,
                    help=f"reopen+retreat+rerun attempts before giving up (default {GRASP_MAX_RETRIES})")
     p.add_argument("--grasp_hold_s", type=float, default=GRASP_HOLD_S,
@@ -770,6 +962,7 @@ def main():
     ROBOT_PORT = args.robot_port
     CAMERA_INDEX = args.camera_index
     TABLE_MASK_ENABLED = args.table_mask
+    COLOR_DISTRACTOR_MASK = args.distractor_mask
     TABLE_VAL_BAND = args.table_val_band
     TABLE_SAT_BAND = args.table_sat_band
     TABLE_WHITE_SAT_THRESH = args.table_white_sat_thresh
@@ -790,7 +983,6 @@ def main():
     GRASP_NUDGE_SETTLE_S = args.grasp_nudge_settle_s
     GRASP_CLOSE_S = args.grasp_close_s
     GRASP_EMPTY_BELOW_DEG = args.grasp_empty_below_deg
-    GRASP_RETREAT_S = args.grasp_retreat_s
     GRASP_MAX_RETRIES = args.grasp_max_retries
     GRASP_HOLD_S = args.grasp_hold_s
     GRASP_LIFT_M = args.grasp_lift_m
@@ -806,6 +998,7 @@ def main():
     else:
         print("No table_z_calib.json — using flat z=0 table assumption "
               "(run examples/table_z_calib.py to fix reach-dependent table height).")
+    load_hue_calib()
 
     viz_on = init_viz(memory_limit=args.viz_memory_limit) if args.viz else False
 
@@ -877,13 +1070,13 @@ def main():
             grasp_phase_ctr = 0
             grasp_retries = 0
             grasp_close_rad = float(np.deg2rad(GRASP_CLOSE_DEG))
+            grasp_open_rad = float(np.deg2rad(120.0))
             grasp_wait_steps = max(1, int(round(GRASP_WAIT_S * CONTROL_HZ)))
             grasp_nudge_steps = max(1, int(round(GRASP_NUDGE_SETTLE_S * CONTROL_HZ)))
             grasp_close_steps = max(1, int(round(GRASP_CLOSE_S * CONTROL_HZ)))
             grasp_hold_steps = max(1, int(round(GRASP_HOLD_S * CONTROL_HZ)))
             grasp_lift_steps = max(1, int(round(GRASP_LIFT_S * CONTROL_HZ)))
-            grasp_hist = collections.deque(maxlen=max(1, int(round(GRASP_RETREAT_S * CONTROL_HZ))))
-            grasp_retreat_seq, grasp_retreat_idx = [], -1
+            grasp_retreat_target = None                  # set on a miss (IK back-off target)
             grasp_result = None                          # "success" | "failed" when terminal
             grasp_min_above = float("inf")               # lowest tcp_above seen (stall detector)
             grasp_stall_ctr = 0
@@ -925,7 +1118,8 @@ def main():
                         ema_camera_hz = inst_camera_hz if ema_camera_hz is None else (1 - ema_alpha) * ema_camera_hz + ema_alpha * inst_camera_hz
                 prev_step_t = t0
 
-                obs_rgb = preprocess_image(rgb).to(device)
+                set_mask_aggressive(qpos)            # aggressive mask when tip is close to the table
+                obs_rgb = preprocess_image(rgb, args.goal_color).to(device)
                 obs_state = build_state(
                     qpos, target_qpos, args.goal_color,
                     bowl_xyz=args.bowl_xyz if use_bowl_xyz else None,
@@ -946,10 +1140,8 @@ def main():
                     # ── FK-gated hardcoded grasp state machine ──────────────
                     if grasp_phase == "approach":
                         # Policy drives BOTH arm and gripper (the gripper's
-                        # open/close motion is part of how it aligns to the
-                        # cube). Buffer commands for a possible retreat.
+                        # open/close motion is part of how it aligns to the cube).
                         target_qpos = np.clip(target_qpos + action * DELTA_CAP, JOINT_LOWER, JOINT_UPPER)
-                        grasp_hist.append(target_qpos.copy())
                         # Track descent: reset the stall counter whenever we reach a new low.
                         if tcp_above < grasp_min_above - GRASP_STALL_EPS:
                             grasp_min_above = tcp_above
@@ -965,9 +1157,8 @@ def main():
                                   f"(gate {gate_z_eff*100:.1f} cm @ r={tcp_r*100:.0f} cm) → wait {GRASP_WAIT_S:.1f}s")
                     elif grasp_phase == "wait":
                         # Keep running the policy (arm + gripper) past the gate
-                        # before the nudge + hardcoded close. Buffer for retreat.
+                        # before the nudge + hardcoded close.
                         target_qpos = np.clip(target_qpos + action * DELTA_CAP, JOINT_LOWER, JOINT_UPPER)
-                        grasp_hist.append(target_qpos.copy())
                         grasp_phase_ctr += 1
                         if grasp_phase_ctr >= grasp_wait_steps:
                             target_qpos, info = back_nudge_joint_target(qpos, target_qpos, GRASP_NUDGE_M, z_table + GRASP_NUDGE_Z)
@@ -989,25 +1180,31 @@ def main():
                                 print(f"  [grasp] GRASPED (gripper stalled at {grip_deg:.1f}° > {GRASP_EMPTY_BELOW_DEG:.0f}°) → hold {GRASP_HOLD_S:.1f}s")
                             elif grasp_retries < GRASP_MAX_RETRIES:
                                 grasp_retries += 1
-                                grasp_retreat_seq = list(grasp_hist)      # oldest→newest
-                                grasp_retreat_idx = len(grasp_retreat_seq) - 1
+                                cur = tcp_pos(qpos)
+                                rad = float(np.hypot(cur[0], cur[1]))
+                                back = (-cur[:2] / rad * GRASP_RETREAT_BACK_M) if rad > 1e-6 else np.zeros(2)
+                                grasp_retreat_target = cur + np.array([back[0], back[1], GRASP_RETREAT_UP_M])
                                 grasp_phase, grasp_phase_ctr = "retreat", 0
-                                print(f"  [grasp] empty (gripper {grip_deg:.1f}°); retreat+retry {grasp_retries}/{GRASP_MAX_RETRIES}")
+                                print(f"  [grasp] empty (gripper {grip_deg:.1f}°); back off "
+                                      f"+{GRASP_RETREAT_UP_M*100:.0f}cm up/{GRASP_RETREAT_BACK_M*100:.0f}cm back, "
+                                      f"retry {grasp_retries}/{GRASP_MAX_RETRIES}")
                             else:
                                 grasp_phase = "hold_open"
                                 grasp_result = "failed"
                                 print(f"  [grasp] FAILED after {GRASP_MAX_RETRIES} retries")
                     elif grasp_phase == "retreat":
-                        # Replay buffered approach commands (arm + gripper) in
-                        # REVERSE to back off along the path we came in (no IK).
-                        if grasp_retreat_idx >= 0:
-                            target_qpos = grasp_retreat_seq[grasp_retreat_idx].copy()
-                            grasp_retreat_idx -= 1
-                        else:
-                            grasp_hist.clear()
+                        # IK the TCP up + back toward the base (gripper open) to get a
+                        # view of where the cube went, then rerun the policy.
+                        vec = grasp_retreat_target - tcp_pos(qpos)
+                        if float(np.linalg.norm(vec)) <= 0.01:
                             grasp_min_above, grasp_stall_ctr = float("inf"), 0   # restart stall detector
                             grasp_phase = "approach"               # rerun policy
-                            print("  [grasp] retreat done → rerunning policy")
+                            print("  [grasp] backed off → rerunning policy")
+                        else:
+                            step_vec = vec * min(1.0, (GRASP_RETREAT_SPEED / CONTROL_HZ) / float(np.linalg.norm(vec)))
+                            dq = nudge_arm_joints(qpos, step_vec)
+                            target_qpos[:5] = np.clip(target_qpos[:5] + dq[:5], JOINT_LOWER[:5], JOINT_UPPER[:5])
+                            target_qpos[5] = grasp_open_rad
                     elif grasp_phase == "hold":
                         target_qpos[5] = grasp_close_rad           # keep object clamped
                         grasp_phase_ctr += 1
