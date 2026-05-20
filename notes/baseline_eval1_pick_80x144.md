@@ -117,9 +117,16 @@ The real camera resolution stays at `1920×1080`; the downsample to
 ## Variant: `eval1_pick_80x144_dropPen3` (drop-penalty 3.0)
 
 **Same config as the baseline + `DROP_PENALTY_COEF=3.0`** (penalty applied
-on every `is_grasped` True→False transition). Converged to the desired
-*one-shot* grasping behaviour — the policy commits to a single grasp
-attempt and avoids fumbles.
+on every `is_grasped` True→False transition). In sim, converged to the
+*one-shot* one-attempt-per-episode behaviour the user wanted.
+
+⚠️ **REAL-ROBOT VERDICT (2026-05-20): worse than the baseline.** Tested
+on the physical SO101 — **~80 % of attempts failed to grasp the cube**
+(grasp success ≈ 20 %). The penalty made the policy too conservative:
+it commits to a single grasp attempt and won't recover if the first try
+fails. So the in-sim convergence to "one-shot" did not transfer; the
+baseline (no drop penalty, allowed to retry) remains the preferred
+deploy target until a different fix is tried.
 
 - **Wandb run:** `fedecominelli04_robot/maniskill-so101/a2huk9qa`
 - **Checkpoint:** `runs/eval1_pick_80x144_dropPen3/ckpt.pt`, embedded
