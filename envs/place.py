@@ -1066,7 +1066,10 @@ class Place(DefaultCameraEnv):
             # (r², θ) across this reset batch when self.spawn_stratified.
             arc_cx, arc_cy = self.spawn_arc_center
             arc_R = self.spawn_arc_radius
-            arc_center_world = self.agent.robot.pose.p[:, :2] + torch.tensor(
+            # Index by env_idx (NOT [:, :2]) so this is sized [b, 2] for partial
+            # resets — otherwise it's [num_envs, 2] and broadcasts wrong against
+            # the [b, 2] offsets, crashing whenever a subset of envs resets.
+            arc_center_world = self.agent.robot.pose.p[env_idx, :2] + torch.tensor(
                 [arc_cx, arc_cy], device=self.device,
             )
 
