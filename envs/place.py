@@ -1729,39 +1729,42 @@ class Place(DefaultCameraEnv):
                 0.0, 1.0,
             )
 
-            # Force-graded touch bonus: continuous signal from "almost
-            # touching" to "firmly touching". Replaces the previous binary
-            # _fixed_finger_touched gate. Smooth ramp (0 → coef·1) as the
-            # MAX of the two fixed-finger forces grows 0 → 5 N. Adds dense
-            # gradient on the final cm of approach, where reach is already
-            # near 1.0 and stops being informative — letting the policy
-            # break out of the hover local minimum by rewarding actual
-            # contact, not just proximity.
-            link_force_mag = torch.linalg.norm(link_forces, axis=1)
-            tip_force_mag = torch.linalg.norm(tip_forces, axis=1)
-            fixed_finger_force = torch.maximum(link_force_mag, tip_force_mag)
-            touch_bonus = (fixed_finger_force / 5.0).clamp(0.0, 1.0) * 0.5
-
-            # Openness bonus runs continuously until grasp lands. The touch
-            # bonus stacks on top to reward actual contact.
-            # Reward shape comparison (open_coef=0.3, strong_grasp_coef=0.5
-            # default — bump to 1.0 via CLI for harder grasp incentive):
+            # NOTE — exploit audit: the force-graded touch bonus that lived
+            # here in commit 5e040a7 was REMOVED because it could be maxed
+            # by *pushing* the cube with the fixed finger (no grasp needed,
+            # force ~5N maintained statically → +0.5 bonus indefinitely).
+            # The hover→push reward (1.80) was too close to the grasp reward
+            # (2.0 with coef=1.0), making "press without grasping" a
+            # competitive local optimum. Now relying on (1) steeper reach to
+            # force the descent, (2) higher strong_grasp_coef to make grasp
+            # clearly dominate any pre-grasp state. Both signals are
+            # impossible to hack: reach uses cube COM (pushing cube while
+            # TCP follows = same d → no extra reward); grasp signal comes
+            # from ManiSkill's two-finger force check.
             #
-            #   state                                 reward (k=10, no bump)
-            #   --------------------------------------------------------------
-            #   hover 3cm above cube, open, no touch  0.74 + 0.3 = 1.04
-            #   hover 1cm above cube, open, no touch  0.91 + 0.3 = 1.21
-            #   touching, open, 2N force              1.00 + 0.3 + 0.2 = 1.50
-            #   touching, open, 5N force              1.00 + 0.3 + 0.5 = 1.80
-            #   grasped + clamped                     1.00 + 0.5 = 1.50
-            #   grasped + clamped (with coef=1.0)     1.00 + 1.0 = 2.00
+            # Reward shape (open_coef=0.3):
             #
-            # With coef=1.0 (recommended) the gradient hover → touch → grasp
-            # is monotonic and steep enough to escape the hover plateau.
+            #   state                                 reward
+            #   ----------------------------------------------------
+            #   hover 5cm above cube, open            0.54 + 0.3 = 0.84
+            #   hover 3cm above cube, open            0.74 + 0.3 = 1.04
+            #   hover 1cm above cube, open            0.91 + 0.3 = 1.21
+            #   touching cube, open                   1.00 + 0.3 = 1.30
+            #   closing (open=0.5), at cube           1.00 + 0.15 = 1.15  ← dip
+            #   closed (open=0), at cube, not grasped 1.00 + 0    = 1.00  ← dip
+            #   grasped + clamped (coef=0.5 default)  1.00 + 0.5  = 1.50
+            #   grasped + clamped (coef=1.0)          1.00 + 1.0  = 2.00
+            #   grasped + clamped (coef=1.5)          1.00 + 1.5  = 2.50
+            #
+            # The closing dip (1.30 → 1.0) is unavoidable without the
+            # exploit-prone touch bonus. To compensate, BUMP
+            # --strong_grasp_coef to 1.5 so the grasp peak (2.5) clearly
+            # dominates the dip cost (≤3 steps × 0.3 = ≤0.9 lost).
+            # Terminal bonus scales as (1+coef)·remaining_steps, so coef=1.5
+            # ⇒ terminal up to 250 — still bounded, q_max should stay <100.
             pre_grasp_reward = (
                 reach
                 + self.pick_side_approach_open_coef * gripper_open
-                + touch_bonus
             )
             grasped_reward = 1.0 + self.strong_grasp_coef * target_closure
             reward = torch.where(is_grasped.bool(), grasped_reward, pre_grasp_reward)
