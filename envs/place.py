@@ -252,6 +252,7 @@ class Place(DefaultCameraEnv):
         item_type="cube",
         n_distractors: int = 1,
         use_real_bowl: bool = True,
+        no_bowl: bool = False,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
         domain_randomization_config: Union[
@@ -389,6 +390,19 @@ class Place(DefaultCameraEnv):
         self.item_type = item_type
         self.n_distractors = n_distractors
         self.use_real_bowl = use_real_bowl
+        # no_bowl: skip bowl actor entirely. Used to match offline demos
+        # recorded without a bowl. Only valid with pick_only_reward (other
+        # reward modes dereference self.bin.pose.p). Assertion below.
+        self.no_bowl = bool(no_bowl)
+        if self.no_bowl:
+            assert pick_only_reward, (
+                "no_bowl=True is only supported with pick_only_reward=True "
+                "(other reward modes reference bin.pose.p which is None when "
+                "no_bowl=True). Either enable pick_only_reward or disable no_bowl."
+            )
+            assert not split_only_reward, (
+                "no_bowl=True is incompatible with split_only_reward."
+            )
 
         if self.split_only_reward:
             if self.pick_only_reward:
@@ -747,6 +761,12 @@ class Place(DefaultCameraEnv):
 
         bins = []
         for i in range(self.num_envs):
+            # no_bowl mode: exit before creating any bin actor. bins stays
+            # empty; self.bin is set to None below. Done as a break instead
+            # of wrapping the for loop in an if/else so the original body
+            # (and its indentation) stays untouched.
+            if self.no_bowl:
+                break
             builder = self.scene.create_actor_builder()
             if self.use_real_bowl:
                 # Dynamic actor with CoACD-decomposed collision and the real
@@ -806,8 +826,13 @@ class Place(DefaultCameraEnv):
             bins.append(bin_actor)
             self.remove_from_state_dict_registry(bin_actor)
 
-        self.bin = Actor.merge(bins, name="bin")
-        self.add_to_state_dict_registry(self.bin)
+        if self.no_bowl:
+            # bins is empty (loop broke before any actor build). Sentinel
+            # value picked up by _initialize_episode / _get_obs* / evaluate.
+            self.bin = None
+        else:
+            self.bin = Actor.merge(bins, name="bin")
+            self.add_to_state_dict_registry(self.bin)
 
         # Distractor cubes (cube tasks only, when n_distractors > 0): same
         # size/physics as the target. Each distractor gets a palette color sampled
@@ -1237,34 +1262,36 @@ class Place(DefaultCameraEnv):
             # Cube–bowl exclusion: cube center must be ≥ 10 cm from bowl
             # center (bowl rim is at 7.5 cm, +2.5 cm safety). Re-sample the
             # BOWL on conflict so the cube's LHS-spread structure is preserved.
-            BOWL_EXCLUSION = 0.10
-            for _ in range(20):
-                delta_xy = item_xy_world - bin_xy_world
-                dist = torch.linalg.norm(delta_xy, dim=-1)
-                bad = dist < BOWL_EXCLUSION
-                if not bad.any():
-                    break
-                n_bad = int(bad.sum().item())
-                bin_xy_offset[bad] = sample_half_disk(n_bad, stratified=False)
-                bin_xy_world = arc_center_world + bin_xy_offset
-            # Hard fix for any holdouts: push the BOWL radially away from the
-            # cube to the exclusion boundary (rare). The push direction is
-            # tangent-only when the conflict is exactly axial; otherwise away
-            # from the cube. May leave the bowl slightly outside the disk in
-            # degenerate cases — acceptable for the rare fallback.
-            delta_xy = bin_xy_world - item_xy_world
-            dist = torch.linalg.norm(delta_xy, dim=-1, keepdim=True)
-            still_bad = (dist < BOWL_EXCLUSION).squeeze(-1)
-            if still_bad.any():
-                direction = torch.where(
-                    dist > 1e-6, delta_xy / dist.clamp(min=1e-6),
-                    torch.tensor([1.0, 0.0], device=self.device).expand_as(delta_xy),
-                )
-                bin_xy_world = torch.where(
-                    still_bad.unsqueeze(-1),
-                    item_xy_world + direction * BOWL_EXCLUSION,
-                    bin_xy_world,
-                )
+            # Skipped entirely in no_bowl mode (no bowl to avoid).
+            if not self.no_bowl:
+                BOWL_EXCLUSION = 0.10
+                for _ in range(20):
+                    delta_xy = item_xy_world - bin_xy_world
+                    dist = torch.linalg.norm(delta_xy, dim=-1)
+                    bad = dist < BOWL_EXCLUSION
+                    if not bad.any():
+                        break
+                    n_bad = int(bad.sum().item())
+                    bin_xy_offset[bad] = sample_half_disk(n_bad, stratified=False)
+                    bin_xy_world = arc_center_world + bin_xy_offset
+                # Hard fix for any holdouts: push the BOWL radially away from the
+                # cube to the exclusion boundary (rare). The push direction is
+                # tangent-only when the conflict is exactly axial; otherwise away
+                # from the cube. May leave the bowl slightly outside the disk in
+                # degenerate cases — acceptable for the rare fallback.
+                delta_xy = bin_xy_world - item_xy_world
+                dist = torch.linalg.norm(delta_xy, dim=-1, keepdim=True)
+                still_bad = (dist < BOWL_EXCLUSION).squeeze(-1)
+                if still_bad.any():
+                    direction = torch.where(
+                        dist > 1e-6, delta_xy / dist.clamp(min=1e-6),
+                        torch.tensor([1.0, 0.0], device=self.device).expand_as(delta_xy),
+                    )
+                    bin_xy_world = torch.where(
+                        still_bad.unsqueeze(-1),
+                        item_xy_world + direction * BOWL_EXCLUSION,
+                        bin_xy_world,
+                    )
 
             # Cluster of (1 + n_distractors) cubes glued face-to-face. The
             # sampled position is the geometric center of the cluster, so the
@@ -1339,23 +1366,29 @@ class Place(DefaultCameraEnv):
                     for k, d_actor in enumerate(self.distractors):
                         self._set_actor_palette_color(d_actor, env_idx, distractor_idxs[:, k])
 
-            # Set bin pose
-            bin_xyz = torch.zeros((b, 3))
-            bin_xyz[:, :2] = bin_xy_world
-            bin_xyz[:, 2] = self.bin_thickness / 2
-            qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
-            self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
+            # Set bin pose. Skipped in no_bowl mode (self.bin is None).
+            if self.bin is not None:
+                bin_xyz = torch.zeros((b, 3))
+                bin_xyz[:, :2] = bin_xy_world
+                bin_xyz[:, 2] = self.bin_thickness / 2
+                qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
+                self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
 
-            # Per-episode bowl color tint (hue ±10°, sat ±10%, value ±10%).
-            # PBR multiplies base_color × vertex_color, so this tints the
-            # baked .ply colors without flattening them.
-            if self.use_real_bowl:
-                self._randomize_bowl_tint(env_idx)
+                # Per-episode bowl color tint (hue ±10°, sat ±10%, value ±10%).
+                # PBR multiplies base_color × vertex_color, so this tints the
+                # baked .ply colors without flattening them.
+                if self.use_real_bowl:
+                    self._randomize_bowl_tint(env_idx)
 
-            # Goal is above bin center (above-rim for bowl, at-floor for parametric)
-            goal_xyz = bin_xyz.clone()
-            goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx] + self.target_z_above_floor
-            self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
+                # Goal is above bin center (above-rim for bowl, at-floor for parametric)
+                goal_xyz = bin_xyz.clone()
+                goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx] + self.target_z_above_floor
+                self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
+            else:
+                # no_bowl: park goal_site at origin (unused — pick_only_reward
+                # ignores goal_site, and it's a kinematic hidden actor).
+                goal_xyz = torch.zeros((b, 3), device=self.device)
+                self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
@@ -1376,8 +1409,13 @@ class Place(DefaultCameraEnv):
         # Bowl centre in the robot base frame (xyz). Appended last so it lands
         # at the end of the flattened state vector. In real-deploy the real
         # robot has no `.pose`; fall back to a fixed measured bowl position.
-        if hasattr(self.agent.robot, "pose") and hasattr(self, "bin"):
+        # no_bowl mode: zero-pad so the state-vector dim stays stable.
+        if getattr(self, "bin", None) is not None and hasattr(self.agent.robot, "pose"):
             obs["bowl_xyz_robot_frame"] = (self.agent.robot.pose.inv() * self.bin.pose).p
+        elif getattr(self, "no_bowl", False):
+            obs["bowl_xyz_robot_frame"] = torch.zeros(
+                qpos.shape[0], 3, dtype=qpos.dtype, device=qpos.device
+            )
         else:
             bowl_xyz = torch.tensor([0.20, 0.10, 0.00], dtype=qpos.dtype, device=qpos.device)
             obs["bowl_xyz_robot_frame"] = bowl_xyz.unsqueeze(0).expand(qpos.shape[0], 3)
@@ -1386,15 +1424,28 @@ class Place(DefaultCameraEnv):
     def _get_obs_extra(self, info: dict):
         obs = dict()
         if self.obs_mode_struct.state:
+            # no_bowl: zero-pad the bin-related slices so the state-vector dim
+            # stays stable across modes. RGB is the primary policy input; the
+            # privileged state slices are zero-padded in deploy and demo loads
+            # too (see RLPD.md table), so this matches.
+            if self.bin is not None:
+                bin_pose = self.bin.pose.raw_pose
+                tcp_to_bin_pos = self.bin.pose.p - self.agent.tcp_pos
+                item_to_bin_pos = self.bin.pose.p - self.item.pose.p
+            else:
+                B = self.item.pose.p.shape[0]
+                bin_pose = torch.zeros(B, 7, device=self.device)
+                tcp_to_bin_pos = torch.zeros(B, 3, device=self.device)
+                item_to_bin_pos = torch.zeros(B, 3, device=self.device)
             obs.update(
                 qvel=self.agent.robot.get_qvel(),
                 is_item_grasped=info["is_item_grasped"],
                 item_pose=self.item.pose.raw_pose,
-                bin_pose=self.bin.pose.raw_pose,
+                bin_pose=bin_pose,
                 tcp_pose=self.agent.tcp_pose.raw_pose,
                 tcp_to_item_grip_pos=self.item.pose.p - self.agent.tcp_pos,
-                tcp_to_bin_pos=self.bin.pose.p - self.agent.tcp_pos,
-                item_to_bin_pos=self.bin.pose.p - self.item.pose.p,
+                tcp_to_bin_pos=tcp_to_bin_pos,
+                item_to_bin_pos=item_to_bin_pos,
             )
             if self.domain_randomization:
                 gripper_params = self.get_gripper_params()
@@ -1411,16 +1462,21 @@ class Place(DefaultCameraEnv):
 
     def evaluate(self):
         item_pos = self.item.pose.p
-        bin_pos = self.bin.pose.p.clone()
-        bin_pos[:, 2] = self.bin_thickness + self.item_half_sizes
+        # no_bowl: cube can never be "above bin" since there's no bin. Force
+        # the boolean to False; bin_pos / offset / inside_* are skipped.
+        if self.bin is not None:
+            bin_pos = self.bin.pose.p.clone()
+            bin_pos[:, 2] = self.bin_thickness + self.item_half_sizes
 
-        offset = item_pos - bin_pos
-        inside_x = torch.abs(offset[:, 0]) < self.bin_half_sizes_x
-        inside_y = torch.abs(offset[:, 1]) < self.bin_half_sizes_y
-        # Cube must also be at least 4 cm above the table (z = 0) so a cube
-        # flush on the table can't trigger above_bin / success.
-        is_cube_above_table = item_pos[:, 2] > 0.04
-        is_item_above_bin = inside_x & inside_y & is_cube_above_table
+            offset = item_pos - bin_pos
+            inside_x = torch.abs(offset[:, 0]) < self.bin_half_sizes_x
+            inside_y = torch.abs(offset[:, 1]) < self.bin_half_sizes_y
+            # Cube must also be at least 4 cm above the table (z = 0) so a cube
+            # flush on the table can't trigger above_bin / success.
+            is_cube_above_table = item_pos[:, 2] > 0.04
+            is_item_above_bin = inside_x & inside_y & is_cube_above_table
+        else:
+            is_item_above_bin = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
 
         item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
         is_item_static = item_vel <= 2e-2
@@ -1438,7 +1494,11 @@ class Place(DefaultCameraEnv):
         is_robot_static = self.agent.is_static()
 
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
-        robot_touching_bin = self.agent.is_touching(self.bin)
+        # no_bowl: no bin to touch; force the boolean to False.
+        if self.bin is not None:
+            robot_touching_bin = self.agent.is_touching(self.bin)
+        else:
+            robot_touching_bin = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
         robot_touching_item = self.agent.is_touching(self.item)
 
         # ── Split mode: inter-cube separation over ALL pairs ────────────────
