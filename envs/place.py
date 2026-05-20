@@ -1678,7 +1678,13 @@ class Place(DefaultCameraEnv):
         tcp_to_item_dist = torch.linalg.norm(
             self.agent.tcp_pose.p - self.item.pose.p, axis=1
         )
-        reach = 1 - torch.tanh(5 * tcp_to_item_dist)
+        # k=10 (was 5) gives a much steeper gradient on the last 2-3 cm
+        # (the critical commit-to-touch zone). With k=5 the reach reward
+        # is essentially flat from 3cm down to 0cm (~0.92 → 1.00), so the
+        # policy has no incentive to descend the final approach — it
+        # settles into a hover local minimum. k=10 widens reach(0)/reach(3cm)
+        # from 0.92/1.00 to 0.74/1.00 → 3.5x stronger descent gradient.
+        reach = 1 - torch.tanh(10 * tcp_to_item_dist)
         is_grasped = info["is_item_grasped"].float()
 
         gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
@@ -1722,17 +1728,41 @@ class Place(DefaultCameraEnv):
                 / (gripper_max - gripper_min),
                 0.0, 1.0,
             )
-            # Openness bonus runs continuously until grasp lands (not just
-            # until fixed-finger contact). Previously the bonus stopped at
-            # touch, so the touch event dropped the reward by open_coef
-            # before the grasp ladder caught up — creating a stable local
-            # minimum where the policy hovers near the cube without ever
-            # committing to contact. With the unified version, the
-            # transition pre-touch → post-touch → grasped is monotonic in
-            # reward (reach+open_coef → unchanged → 1+strong_grasp_coef).
-            # _fixed_finger_touched is still tracked (sticky) for logging /
-            # debug; no longer gates the reward shape.
-            pre_grasp_reward = reach + self.pick_side_approach_open_coef * gripper_open
+
+            # Force-graded touch bonus: continuous signal from "almost
+            # touching" to "firmly touching". Replaces the previous binary
+            # _fixed_finger_touched gate. Smooth ramp (0 → coef·1) as the
+            # MAX of the two fixed-finger forces grows 0 → 5 N. Adds dense
+            # gradient on the final cm of approach, where reach is already
+            # near 1.0 and stops being informative — letting the policy
+            # break out of the hover local minimum by rewarding actual
+            # contact, not just proximity.
+            link_force_mag = torch.linalg.norm(link_forces, axis=1)
+            tip_force_mag = torch.linalg.norm(tip_forces, axis=1)
+            fixed_finger_force = torch.maximum(link_force_mag, tip_force_mag)
+            touch_bonus = (fixed_finger_force / 5.0).clamp(0.0, 1.0) * 0.5
+
+            # Openness bonus runs continuously until grasp lands. The touch
+            # bonus stacks on top to reward actual contact.
+            # Reward shape comparison (open_coef=0.3, strong_grasp_coef=0.5
+            # default — bump to 1.0 via CLI for harder grasp incentive):
+            #
+            #   state                                 reward (k=10, no bump)
+            #   --------------------------------------------------------------
+            #   hover 3cm above cube, open, no touch  0.74 + 0.3 = 1.04
+            #   hover 1cm above cube, open, no touch  0.91 + 0.3 = 1.21
+            #   touching, open, 2N force              1.00 + 0.3 + 0.2 = 1.50
+            #   touching, open, 5N force              1.00 + 0.3 + 0.5 = 1.80
+            #   grasped + clamped                     1.00 + 0.5 = 1.50
+            #   grasped + clamped (with coef=1.0)     1.00 + 1.0 = 2.00
+            #
+            # With coef=1.0 (recommended) the gradient hover → touch → grasp
+            # is monotonic and steep enough to escape the hover plateau.
+            pre_grasp_reward = (
+                reach
+                + self.pick_side_approach_open_coef * gripper_open
+                + touch_bonus
+            )
             grasped_reward = 1.0 + self.strong_grasp_coef * target_closure
             reward = torch.where(is_grasped.bool(), grasped_reward, pre_grasp_reward)
         else:
