@@ -822,7 +822,12 @@ if __name__ == "__main__":
     else:
         alpha = torch.as_tensor(args.alpha, device=device)
 
-    # Load checkpoint
+    # Load checkpoint. warm_start_offset carries the checkpoint's cumulative
+    # step so wandb curves of a warm-started run continue where the previous
+    # one ended (stacked end-to-end) instead of overlaying from 0. Control
+    # flow (eval timing, learning_starts) still uses the run-local global_step
+    # that starts at 0; only the *logged/saved* step is offset.
+    warm_start_offset = 0
     if args.checkpoint is not None:
         if args.checkpoint.lower() == "wandb":
             artifact_path = f"{args.wandb_entity}/{args.wandb_project_name}/model_{args.agent_name}_{args.env_id}_{args.seed}:latest"
@@ -839,7 +844,8 @@ if __name__ == "__main__":
             with torch.no_grad():
                 log_alpha.copy_(ckpt['log_alpha'])
                 alpha.copy_(log_alpha.exp())
-        print(f"Loaded checkpoint from {args.checkpoint} at step {ckpt['global_step']}")
+        warm_start_offset = int(ckpt.get('global_step', 0))
+        print(f"Loaded checkpoint from {args.checkpoint} at step {warm_start_offset}")
 
     # ── Inference copies (weight-sharing via from_module) ──────────────────
 
@@ -1089,8 +1095,9 @@ if __name__ == "__main__":
     for iteration in range(args.num_total_iterations + 2):  # +2 for final eval
         # Evaluate
         if args.eval_freq > 0 and ((global_step - args.num_envs) // args.eval_freq) < (global_step // args.eval_freq):
+            cum_step = global_step + warm_start_offset
             eval_d = evaluate(args, eval_envs, get_eval_action, logger, eval_output_dir,
-                              max_episode_steps, global_step, pbar)
+                              max_episode_steps, cum_step, pbar)
             if args.evaluate:
                 break
             if args.save_model:
@@ -1099,12 +1106,12 @@ if __name__ == "__main__":
                     'actor': actor.state_dict(),
                     'critic': critic_target.state_dict(),
                     'log_alpha': log_alpha,
-                    'global_step': global_step,
+                    'global_step': cum_step,
                 }
                 torch.save(ckpt_payload, model_path)
                 # Per-eval history (one file per eval, never overwritten).
                 step_path = model_path.replace(
-                    "ckpt.pt", f"ckpt_step{global_step:09d}.pt")
+                    "ckpt.pt", f"ckpt_step{cum_step:09d}.pt")
                 torch.save(ckpt_payload, step_path)
                 # Best-by-success_at_end (overwrites itself on new highs).
                 # SAC commonly collapses after a peak; this lets you recover the
@@ -1116,7 +1123,7 @@ if __name__ == "__main__":
                     best_success_at_end = cur_success
                     torch.save(ckpt_payload, best_model_path)
                     msg_extra = f"  (NEW BEST success_at_end={cur_success:.3f})"
-                print(f"Step {global_step}: ckpt saved to {model_path} and {step_path}{msg_extra}")
+                print(f"Step {cum_step}: ckpt saved to {model_path} and {step_path}{msg_extra}")
                 # Crash-safety: push the latest ckpt to wandb every eval (not
                 # just at training end). Same artifact name → wandb versions
                 # it (v0, v1, ... :latest) without exploding storage. Best
@@ -1202,12 +1209,12 @@ if __name__ == "__main__":
             # logging for terminal bar
             max_ep_ret = max(infos["final_info"]["episode"]["return"][done_mask])
             avg_returns.extend(infos["final_info"]["episode"]["return"][done_mask])
-            desc = f"global_step={global_step}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
+            desc = f"global_step={global_step + warm_start_offset}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
             # Calculate wall_time metrics
             sps = global_step / logger.wall_time
             d["time/sps"] = sps
             pbar.set_description(f"{sps: 4.4f} sps, " + desc)
-            logger.log(d=d, step=global_step)
+            logger.log(d=d, step=global_step + warm_start_offset)
 
         # Increment counters
         pbar.update(args.num_envs)
