@@ -39,6 +39,23 @@ else
   echo "ERROR: SPLIT_HOVER must be 'true' or 'false', got $SPLIT_HOVER" >&2; exit 1
 fi
 
+# SPLIT_COLOR_HIERARCHY: when "true", isolate cubes one at a time in a fixed
+# color-priority order (curriculum) instead of all-at-once. Recommended for
+# many cubes (4-cube). SPLIT_FAR_PENALTY_COEF: harsh penalty per cube flung
+# more than SPLIT_FAR_PENALTY_DIST (m) from the cluster centre (0 = off).
+SPLIT_COLOR_HIERARCHY="${SPLIT_COLOR_HIERARCHY:-false}"
+SPLIT_FAR_PENALTY_COEF="${SPLIT_FAR_PENALTY_COEF:-0.0}"
+SPLIT_FAR_PENALTY_DIST="${SPLIT_FAR_PENALTY_DIST:-0.15}"
+if [ "$SPLIT_COLOR_HIERARCHY" = "true" ]; then
+  HIER_FLAG="--split_color_hierarchy"
+  HIER_TAG="_seq"
+elif [ "$SPLIT_COLOR_HIERARCHY" = "false" ]; then
+  HIER_FLAG="--no-split_color_hierarchy"
+  HIER_TAG=""
+else
+  echo "ERROR: SPLIT_COLOR_HIERARCHY must be 'true' or 'false', got $SPLIT_COLOR_HIERARCHY" >&2; exit 1
+fi
+
 # ── Task / stage ────────────────────────────────────────────────────────────
 # Split is the eval2 setup: exactly two cubes (1 distractor). The reward
 # requires n_distractors >= 1; default to 1.
@@ -94,9 +111,9 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
 # Auto-name by cube count (= n_distractors + 1) and hover mode, e.g.
 # split_2cube_80x144, split_4cube_hover_80x144.
 NCUBES=$((N_DISTRACTORS + 1))
-EXP_NAME="${EXP_NAME:-split_${NCUBES}cube${HOVER_TAG}_80x144}"
+EXP_NAME="${EXP_NAME:-split_${NCUBES}cube${HOVER_TAG}${HIER_TAG}_80x144}"
 WANDB_PROJECT="${WANDB_PROJECT:-maniskill-so101}"
-WANDB_GROUP="${WANDB_GROUP:-SQUINT-SPLIT-${NCUBES}cube${HOVER_TAG}-$(date +%Y%m%d-%H%M)}"
+WANDB_GROUP="${WANDB_GROUP:-SQUINT-SPLIT-${NCUBES}cube${HOVER_TAG}${HIER_TAG}-$(date +%Y%m%d-%H%M)}"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate squint
@@ -106,8 +123,9 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 echo ""
 echo "================================================================"
-echo "  Split run: $EXP_NAME   ($NCUBES cubes, hover=$SPLIT_HOVER)"
+echo "  Split run: $EXP_NAME   ($NCUBES cubes, hover=$SPLIT_HOVER, hierarchy=$SPLIT_COLOR_HIERARCHY)"
 echo "  target_gap=$SPLIT_TARGET_GAP m   sep_coef=$SPLIT_SEP_COEF   hover_z=$SPLIT_HOVER_Z m   shadows=$SHADOWS"
+echo "  far_penalty_coef=$SPLIT_FAR_PENALTY_COEF   far_penalty_dist=$SPLIT_FAR_PENALTY_DIST m"
 echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS"
 echo "  cam_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX]"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
@@ -142,7 +160,10 @@ python train_squint.py \
     --split_target_gap="$SPLIT_TARGET_GAP" \
     --split_sep_coef="$SPLIT_SEP_COEF" \
     --split_hover_z="$SPLIT_HOVER_Z" \
+    --split_far_penalty_coef="$SPLIT_FAR_PENALTY_COEF" \
+    --split_far_penalty_dist="$SPLIT_FAR_PENALTY_DIST" \
     $HOVER_FLAG \
+    $HIER_FLAG \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \

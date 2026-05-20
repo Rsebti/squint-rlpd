@@ -133,6 +133,12 @@ class Args:
     """Split hover phase: weight on the hover-approach reward (phase-2 per-step peak = 1 + split_sep_coef + this)."""
     split_hover_tol: float = 0.015
     """Split hover phase: TCP distance (m) to the hover point under which it counts as 'at hover' for success."""
+    split_color_hierarchy: bool = False
+    """Split curriculum: isolate cubes ONE at a time in a fixed color-priority order (lowest color index first), instead of pushing on the worst pairwise gap all at once. Easier signal for many cubes. Reach + isolate the current target, advance when it's ≥ split_target_gap from all others."""
+    split_far_penalty_coef: float = 0.0
+    """Split anti-fling penalty: −coef per cube further than split_far_penalty_dist from the cluster spawn centre (also gates success). 0 = off; set high (e.g. 10) to harshly discourage knocking cubes away."""
+    split_far_penalty_dist: float = 0.15
+    """Split anti-fling penalty: distance (m) from the cluster spawn centre beyond which a cube is 'flung' and penalised."""
     env_shadows: bool = True
     """If True, the DR env's directional lights cast shadows (extra GPU shadow-map allocation per env per directional light). Default True for max sim2real lighting variation. Set False when SAPIEN's parallel renderer can't allocate enough buffers (e.g. 1024+ envs × 360×640 render at default shader)."""
     sim_freq: int = 100
@@ -755,6 +761,12 @@ if __name__ == "__main__":
         eval_env_kwargs["split_hover_coef"] = args.split_hover_coef
         env_kwargs["split_hover_tol"] = args.split_hover_tol
         eval_env_kwargs["split_hover_tol"] = args.split_hover_tol
+        env_kwargs["split_color_hierarchy"] = args.split_color_hierarchy
+        eval_env_kwargs["split_color_hierarchy"] = args.split_color_hierarchy
+        env_kwargs["split_far_penalty_coef"] = args.split_far_penalty_coef
+        eval_env_kwargs["split_far_penalty_coef"] = args.split_far_penalty_coef
+        env_kwargs["split_far_penalty_dist"] = args.split_far_penalty_dist
+        eval_env_kwargs["split_far_penalty_dist"] = args.split_far_penalty_dist
     # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
     env_kwargs["sim_freq"] = args.sim_freq
     eval_env_kwargs["sim_freq"] = args.sim_freq

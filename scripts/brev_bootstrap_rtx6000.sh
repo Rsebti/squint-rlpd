@@ -77,6 +77,9 @@ export SPLIT_HOVER="${SPLIT_HOVER:-}"
 export SPLIT_TARGET_GAP="${SPLIT_TARGET_GAP:-}"
 export SPLIT_SEP_COEF="${SPLIT_SEP_COEF:-}"
 export SPLIT_HOVER_Z="${SPLIT_HOVER_Z:-}"
+export SPLIT_COLOR_HIERARCHY="${SPLIT_COLOR_HIERARCHY:-}"
+export SPLIT_FAR_PENALTY_COEF="${SPLIT_FAR_PENALTY_COEF:-}"
+export SPLIT_FAR_PENALTY_DIST="${SPLIT_FAR_PENALTY_DIST:-}"
 
 REPO_DIR="$HOME/squint"
 SQUINT_REMOTE="https://github.com/fedecomi04/squint.git"
@@ -148,6 +151,9 @@ tmux new-session -d -s squint \
      export SPLIT_TARGET_GAP='$SPLIT_TARGET_GAP' && \
      export SPLIT_SEP_COEF='$SPLIT_SEP_COEF' && \
      export SPLIT_HOVER_Z='$SPLIT_HOVER_Z' && \
+     export SPLIT_COLOR_HIERARCHY='$SPLIT_COLOR_HIERARCHY' && \
+     export SPLIT_FAR_PENALTY_COEF='$SPLIT_FAR_PENALTY_COEF' && \
+     export SPLIT_FAR_PENALTY_DIST='$SPLIT_FAR_PENALTY_DIST' && \
      bash $LAUNCHER 2>&1 | tee $HOME/training.log"
 
 echo ""

@@ -284,6 +284,9 @@ class Place(DefaultCameraEnv):
         split_hover_z: float = 0.05,
         split_hover_coef: float = 1.0,
         split_hover_tol: float = 0.015,
+        split_color_hierarchy: bool = False,
+        split_far_penalty_coef: float = 0.0,
+        split_far_penalty_dist: float = 0.15,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -347,11 +350,27 @@ class Place(DefaultCameraEnv):
         self.split_hover_z = float(split_hover_z)
         self.split_hover_coef = float(split_hover_coef)
         self.split_hover_tol = float(split_hover_tol)
+        # Color-ordered separation curriculum (split mode): instead of pushing
+        # on the worst pairwise gap (all at once), isolate ONE cube at a time
+        # in a fixed color-priority order (lowest color index first), advancing
+        # only once the current target is ≥ split_target_gap from all others.
+        self.split_color_hierarchy = bool(split_color_hierarchy)
+        # Harsh anti-fling penalty: −coef per cube that ends up further than
+        # split_far_penalty_dist (m) from the cluster spawn centre. Also gates
+        # success (no cube may be flung). 0 = disabled.
+        self.split_far_penalty_coef = float(split_far_penalty_coef)
+        self.split_far_penalty_dist = float(split_far_penalty_dist)
         # Per-env consecutive-stable counter (split mode). Lazy init in evaluate.
         self._split_slow_counter = None
         # Per-env sticky "all cubes separated this episode" flag (split mode).
         # Lazy init in evaluate; reset per-episode in _initialize_episode.
         self._all_separated_sticky = None
+        # Per-env current curriculum stage (split_color_hierarchy). Reset to 0
+        # per-episode; advances as each color-ranked cube is isolated.
+        self._split_stage = None
+        # Per-env cluster spawn centre (xy), snapshotted at episode init; used
+        # by the anti-fling penalty. Lazy init in _initialize_episode.
+        self._split_cluster_xy = None
         self._last_action = None
         self._just_reset_mask = None
         # Per-env state for the "stay at lift xy" reward: cube xy snapshotted
@@ -1086,6 +1105,14 @@ class Place(DefaultCameraEnv):
             # Clear the sticky "all cubes separated" flag for reset envs.
             if self._all_separated_sticky is not None:
                 self._all_separated_sticky[env_idx] = False
+            # Reset the color-hierarchy curriculum stage for reset envs.
+            if self._split_stage is not None:
+                self._split_stage[env_idx] = 0
+            # Lazily allocate the cluster-centre buffer (snapshotted below).
+            if self.split_only_reward and self._split_cluster_xy is None:
+                self._split_cluster_xy = torch.zeros(
+                    self.num_envs, 2, device=self.device
+                )
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1192,6 +1219,9 @@ class Place(DefaultCameraEnv):
             # goal cube can be ANY of the slots (center or any cardinal),
             # uniformly random — not always the middle one.
             cluster_xy = item_xy_world
+            # Snapshot the cluster spawn centre for the split anti-fling penalty.
+            if self.split_only_reward and self._split_cluster_xy is not None:
+                self._split_cluster_xy[env_idx] = cluster_xy
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             n_d = len(self.distractors)
 
@@ -1365,6 +1395,10 @@ class Place(DefaultCameraEnv):
         # min_gap ≥ split_target_gap. Only computed in split mode.
         cube_separation = torch.zeros_like(item_vel)
         min_gap = torch.zeros_like(item_vel)
+        split_num_far = torch.zeros_like(item_vel)
+        split_stage_f = torch.zeros_like(item_vel)
+        split_target_pos = item_pos
+        split_target_min_gap = min_gap
         if self.split_only_reward:
             cube_pos = torch.stack(
                 [item_pos] + [d.pose.p for d in self.distractors], dim=1
@@ -1383,30 +1417,63 @@ class Place(DefaultCameraEnv):
             cube_separation = min_center_dist
             min_gap = min_center_dist - 2.0 * self.item_half_sizes
             cubes_slow_all = (cube_vel < self.split_stable_speed_threshold).all(dim=1)
+            E = cube_pos.shape[0]
+            arange_E = torch.arange(E, device=self.device)
+
+            # Anti-fling count: cubes further than split_far_penalty_dist (xy)
+            # from the cluster spawn centre. no_fling gates success.
+            if self.split_far_penalty_coef > 0.0 and self._split_cluster_xy is not None:
+                far_dist = torch.linalg.norm(
+                    cube_pos[..., :2] - self._split_cluster_xy[:, None, :], axis=-1
+                )  # (E, C)
+                split_num_far = (far_dist > self.split_far_penalty_dist).sum(dim=1).float()
+                no_fling = split_num_far == 0
+            else:
+                no_fling = torch.ones(E, dtype=torch.bool, device=self.device)
+
+            # Color-ordered curriculum: isolate ONE cube at a time, lowest color
+            # index first. split_target_min_gap = the current target's smallest
+            # gap to the others; the stage advances once the target is isolated.
+            if self.split_color_hierarchy:
+                if self._split_stage is None or self._split_stage.shape[0] != E:
+                    self._split_stage = torch.zeros(E, dtype=torch.long, device=self.device)
+                color_idx = torch.stack(
+                    [self.goal_color_idx]
+                    + [self.distractor_color_idxs[:, k] for k in range(len(self.distractors))],
+                    dim=1,
+                ).long()  # (E, C)
+                order = torch.argsort(color_idx, dim=1)  # cube idx by color rank
+                stage_c = self._split_stage.clamp(max=C - 1)
+                target_idx = order[arange_E, stage_c]
+                split_target_pos = cube_pos[arange_E, target_idx]  # (E, 3)
+                d_to_target = torch.linalg.norm(
+                    cube_pos - split_target_pos[:, None, :], axis=-1
+                )  # (E, C)
+                d_to_target[arange_E, target_idx] = float("inf")  # exclude self
+                split_target_min_gap = d_to_target.amin(dim=1) - 2.0 * self.item_half_sizes
+                advance = (split_target_min_gap >= self.split_target_gap) & (self._split_stage < C)
+                self._split_stage = self._split_stage + advance.long()
+                split_stage_f = self._split_stage.float()
 
             # Sticky "all cubes have been separated this episode" flag — gates
             # the hover phase so the reward doesn't oscillate if a cube drifts.
-            if self._all_separated_sticky is None or self._all_separated_sticky.shape[0] != item_pos.shape[0]:
-                self._all_separated_sticky = torch.zeros(
-                    item_pos.shape[0], dtype=torch.bool, device=self.device
-                )
+            if self._all_separated_sticky is None or self._all_separated_sticky.shape[0] != E:
+                self._all_separated_sticky = torch.zeros(E, dtype=torch.bool, device=self.device)
             all_separated = min_gap >= self.split_target_gap
             self._all_separated_sticky = self._all_separated_sticky | all_separated
 
-            if self._split_slow_counter is None or self._split_slow_counter.shape[0] != item_pos.shape[0]:
-                self._split_slow_counter = torch.zeros(
-                    item_pos.shape[0], dtype=torch.int32, device=self.device
-                )
+            if self._split_slow_counter is None or self._split_slow_counter.shape[0] != E:
+                self._split_slow_counter = torch.zeros(E, dtype=torch.int32, device=self.device)
             if self.split_hover_after_separate:
-                # Phase 2: the TCP (finger-tip midpoint) must reach
-                # split_hover_z above the GOAL cube while all cubes stay
-                # separated and nearly static.
+                # Phase 2: the TCP (finger-tip midpoint) must reach split_hover_z
+                # above the GOAL cube while all cubes stay separated and still.
                 hover_target = item_pos.clone()
                 hover_target[:, 2] = hover_target[:, 2] + self.split_hover_z
                 hover_dist = torch.linalg.norm(self.agent.tcp_pose.p - hover_target, axis=1)
                 stable_split = all_separated & (hover_dist < self.split_hover_tol) & cubes_slow_all
             else:
                 stable_split = all_separated & cubes_slow_all
+            stable_split = stable_split & no_fling  # can't succeed with a flung cube
             self._split_slow_counter = torch.where(
                 stable_split,
                 self._split_slow_counter + 1,
@@ -1453,6 +1520,10 @@ class Place(DefaultCameraEnv):
             "robot_touching_item": robot_touching_item,
             "cube_separation": cube_separation,
             "min_gap": min_gap,
+            "split_num_far": split_num_far,
+            "split_stage": split_stage_f,
+            "split_target_pos": split_target_pos,
+            "split_target_min_gap": split_target_min_gap,
         }
 
     @property
@@ -1588,18 +1659,29 @@ class Place(DefaultCameraEnv):
         item_pos = self.item.pose.p
         tcp = self.agent.tcp_pose.p
 
-        # Reach the NEAREST cube (goal or any distractor) so the policy can push.
-        cube_pos = torch.stack(
-            [item_pos] + [d.pose.p for d in self.distractors], dim=1
-        )  # (E, C, 3)
-        reach = 1 - torch.tanh(
-            5 * torch.linalg.norm(cube_pos - tcp[:, None, :], axis=-1).amin(dim=1)
-        )
-
-        # Separation progress on the smallest pairwise gap: 0 at the touching
-        # start, 1 once every pair is ≥ split_target_gap apart.
-        sep_progress = torch.clamp(info["min_gap"] / self.split_target_gap, 0.0, 1.0)
-        phase1 = reach + self.split_sep_coef * sep_progress
+        if self.split_color_hierarchy:
+            # Curriculum phase 1: reach the CURRENT target cube and isolate it;
+            # staged progress = (completed stages + current-target progress)/C,
+            # so the signal is focused on one cube at a time, in color order.
+            C = len(self.distractors) + 1
+            reach = 1 - torch.tanh(
+                5 * torch.linalg.norm(tcp - info["split_target_pos"], axis=1)
+            )
+            target_progress = torch.clamp(
+                info["split_target_min_gap"] / self.split_target_gap, 0.0, 1.0
+            )
+            staged = torch.clamp((info["split_stage"] + target_progress) / C, 0.0, 1.0)
+            phase1 = reach + self.split_sep_coef * staged
+        else:
+            # Reach the NEAREST cube; progress on the smallest pairwise gap.
+            cube_pos = torch.stack(
+                [item_pos] + [d.pose.p for d in self.distractors], dim=1
+            )  # (E, C, 3)
+            reach = 1 - torch.tanh(
+                5 * torch.linalg.norm(cube_pos - tcp[:, None, :], axis=-1).amin(dim=1)
+            )
+            sep_progress = torch.clamp(info["min_gap"] / self.split_target_gap, 0.0, 1.0)
+            phase1 = reach + self.split_sep_coef * sep_progress
 
         if self.split_hover_after_separate:
             hover_target = item_pos.clone()
@@ -1615,6 +1697,8 @@ class Place(DefaultCameraEnv):
         # User-requested contact penalties: table + bowl (bin).
         reward = reward - self.split_table_penalty_coef * info["robot_touching_table"].float()
         reward = reward - self.split_bowl_penalty_coef * info["robot_touching_bin"].float()
+        # Harsh anti-fling penalty: −coef per cube flung past split_far_penalty_dist.
+        reward = reward - self.split_far_penalty_coef * info["split_num_far"]
 
         # Terminal bonus, mirroring pick-only's accounting: per_step_peak ·
         # remaining steps so an early success equals continuing at peak.
