@@ -1,0 +1,1285 @@
+import os
+os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
+os.environ["EXCLUDE_TD_FROM_PYTREE"] = "1"
+os.environ["TORCH_LOGS"] = "-dynamo,-inductor"
+
+import warnings
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+warnings.filterwarnings("ignore", message="Using lock_\\(\\) in a compiled graph")
+
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from datetime import datetime
+
+import math
+import random
+import time
+import glob
+from typing import Optional
+
+from mani_skill.utils import gym_utils
+from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper, FlattenRGBDObservationWrapper
+from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+
+import gymnasium as gym
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import tyro
+import tqdm
+import wandb
+from tensordict import TensorDict, from_module, from_modules
+from tensordict.nn import CudaGraphModule
+from torchrl.data import LazyTensorStorage, ReplayBuffer
+
+# Add tasks
+import envs
+import mani_skill.envs
+
+import utils
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+
+@dataclass
+class Args:
+    exp_name: Optional[str] = "baseline"
+    """the name of this experiment"""
+    agent_name: Optional[str] = "rlpd"
+    """for logging and tracking"""
+    seed: int = 1
+    """seed of the experiment"""
+    torch_deterministic: bool = True
+    """if toggled, `torch.backends.cudnn.deterministic=False`"""
+    cuda: bool = True
+    """if toggled, cuda will be enabled by default"""
+    track: bool = True
+    """if toggled, this experiment will be tracked with Weights and Biases"""
+    wandb_entity: Optional[str] = None
+    """the entity (team) of wandb's project. None = use the default entity from `wandb login`."""
+    wandb_project_name: str = "maniskill-so101"
+    """the wandb's project name"""
+    wandb_group: str = "RLPD"
+    """the group of the run for wandb"""
+    capture_video: bool = True
+    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    save_trajectory: bool = False
+    """whether to save trajectory data into the `videos` folder"""
+    save_qpos: bool = False
+    """whether to save per-step joint positions during eval to `runs/{run_name}/qpos/` (one .txt per parallel env, sampled at the env control freq of 10 Hz)"""
+    save_model: bool = True
+    """whether to save model into the `runs/{run_name}` folder, and to wandb if wandb is set"""
+    evaluate: bool = False
+    """if toggled, only runs evaluation with the given model checkpoint and saves the evaluation trajectories"""
+    checkpoint: Optional[str] = None
+    """path to a pretrained checkpoint file to start evaluation/training from (if set to "wandb" will attempt downloading from wandb)"""
+    freeze_encoder_after_frac: float = 0.9
+    """fraction of total_timesteps after which the CNN encoder is frozen (no further updates). 0.0 = never freeze."""
+
+    # Environment specific arguments
+    env_id: str = "SO101PlaceCube-v1"
+    """the id of the environment"""
+    env_domain_randomization: bool = True
+    """adds domain randomization flag if env supports it"""
+    n_distractors: int = 1
+    """for cube tasks, number of distractor cubes to spawn alongside the target (0 = single block, 1 = goal + 1 distractor, up to 5 = full palette). Distractors get unique palette colors distinct from the goal. The 6-d goal-color one-hot is always passed to the policy regardless."""
+    use_real_bowl: bool = True
+    """If True (default), use the SAM-3D bowl mesh at envs/meshes/bowl.obj (CoACD-decomposed dynamic collider, ~15 cm diameter). Pass --no-use_real_bowl to fall back to the parametric rectangular bin. Use the mesh-rebuild script in scripts/mesh_bowl_from_ply.py to regenerate."""
+    num_envs: int = 2048
+    """the number of parallel environments"""
+    num_eval_envs: int = 16
+    """the number of parallel evaluation environments"""
+    partial_reset: bool = True
+    """whether to let parallel environments reset upon termination instead of truncation. Default True: episodes end the step an env reports success, so the buffer doesn't fill with already-succeeded frames."""
+    eval_partial_reset: bool = False
+    """whether to let parallel evaluation environments reset upon termination instead of truncation"""
+    reconfiguration_freq: Optional[int] = None
+    """how often to reconfigure the environment during training"""
+    eval_reconfiguration_freq: Optional[int] = 1
+    """for benchmarking purposes we want to reconfigure the eval environment each reset to ensure objects are randomized in some tasks"""
+    eval_freq: int = 400_000
+    """evaluation frequency in terms of global steps"""
+    eval_max_episode_steps: int = 0
+    """override max episode steps for evaluation only (0 = use env spec)"""
+    save_train_video_freq: Optional[int] = None
+    """frequency to save training videos in terms of iterations"""
+    control_mode: Optional[str] = None
+    """the control mode to use for the environment"""
+    action_smooth_coef: float = 0.0
+    """Coefficient on the per-step action-rate penalty -coef * ||a_t - a_{t-1}||^2 added to the PlaceCube dense reward. Disabled by default — the penalty creates a 'do nothing' attractor for from-scratch training. Enable (e.g. 0.05-0.2) only for fine-tuning a working policy if eval shows jitter."""
+    pick_only_reward: bool = False
+    """If True, switch the Place env to pick-only mode: reward = reach → grasp → close hard; success = grasped + cube nearly stationary for 1 s. Episode auto-terminates on success. The full pick-and-place reward (z lift / xy-to-bowl / above-bin / release) is skipped entirely."""
+    pick_side_approach: bool = False
+    """Pick-only side-approach curriculum. Until the FIXED gripper finger touches the cube, the reward is (reach + open_coef·gripper_openness) only — no grasp/strong-grasp incentive — forcing the policy to approach with the gripper fully open and land the fixed finger first. Once touched (sticky for the episode), the normal grasp ladder kicks in. Reduces the failure mode where the policy arrives top-down with the moving finger pre-closed (works in sim, fails in real)."""
+    pick_side_approach_open_coef: float = 0.3
+    """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
+    drop_penalty_coef: float = 0.0
+    """Pick-only mode: penalty applied on every grasped→not-grasped transition (i.e., each drop). Default 0 = disabled; set e.g. 3.0 to penalise fumbles and push the policy to one-shot the grasp."""
+    split_only_reward: bool = False
+    """If True, switch the Place env to split-only mode: reward = reach nearest cube → push the two cubes apart → hold still; success = surface gap between the two cubes ≥ split_target_gap AND both cubes nearly static for 0.5 s. No grasping. Requires n_distractors >= 1. Mutually exclusive with pick_only_reward."""
+    split_target_gap: float = 0.03
+    """Split mode: target surface-to-surface gap (m) between the two cubes for success. Cube centers must reach 2·half_size + this (e.g. 0.03 m gap ≈ 0.05 m center-to-center for a ~2 cm cube)."""
+    split_sep_coef: float = 1.0
+    """Split mode: weight on the separation-progress reward term (per-step peak = 1 + this). Default 1.0 → reach (≤1) + separation (≤1) gives a per-step peak of 2.0."""
+    split_hover_after_separate: bool = False
+    """Split mode two-phase: once ALL cubes are separated (every pair ≥ split_target_gap), switch to a hover phase that drives the TCP (finger-tip midpoint) to split_hover_z above the GOAL cube. Success then requires separated + TCP at the hover point + cubes static. Default False = pure separate."""
+    split_hover_z: float = 0.05
+    """Split hover phase: height (m) the TCP must reach above the goal cube centre (default 5 cm)."""
+    split_hover_coef: float = 1.0
+    """Split hover phase: weight on the hover-approach reward (phase-2 per-step peak = 1 + split_sep_coef + this)."""
+    split_hover_tol: float = 0.015
+    """Split hover phase: TCP distance (m) to the hover point under which it counts as 'at hover' for success."""
+    split_color_hierarchy: bool = False
+    """Split curriculum: isolate cubes ONE at a time in a fixed color-priority order (lowest color index first), instead of pushing on the worst pairwise gap all at once. Easier signal for many cubes. Reach + isolate the current target, advance when it's ≥ split_target_gap from all others."""
+    split_far_penalty_coef: float = 0.0
+    """Split anti-fling penalty: −coef per cube further than split_far_penalty_dist from the cluster spawn centre (also gates success). 0 = off; set high (e.g. 10) to harshly discourage knocking cubes away."""
+    split_far_penalty_dist: float = 0.15
+    """Split anti-fling penalty: distance (m) from the cluster spawn centre beyond which a cube is 'flung' and penalised."""
+    env_shadows: bool = True
+    """If True, the DR env's directional lights cast shadows (extra GPU shadow-map allocation per env per directional light). Default True for max sim2real lighting variation. Set False when SAPIEN's parallel renderer can't allocate enough buffers (e.g. 1024+ envs × 360×640 render at default shader)."""
+    sim_freq: int = 100
+    """Physics substep rate (Hz). Default 100 Hz = 10 ms/substep. Won the 2026-05-20 sim2real ablation vs 300 Hz."""
+    control_freq: int = 10
+    """Control rate (Hz). Episode time per step = 1/control_freq. 7 s episode @ 10 Hz = 70 steps."""
+    camera_lag_substeps_min: int = 0
+    """Min per-env camera-lag substeps (inclusive). Default 0 = no camera lag (won the 2026-05-20 ablation vs latency-on). At sim_freq=100, 1 substep = 10 ms."""
+    camera_lag_substeps_max: int = 0
+    """Max per-env camera-lag substeps (inclusive). Default 0 = no camera lag. At sim_freq=100, 5 substeps = 50 ms; at sim_freq=300, 15 substeps = 50 ms."""
+    obs_mode: Optional[str] = "rgb"
+    """the observation output mode of the environment"""
+    render_mode: Optional[str] = "all"
+    """the rendering mode of the environment, could be rgb or all"""
+    render_height: int = 360
+    """sim wrist-camera render height (before downsampling). 360 matches the
+    real-camera 16:9 aspect (1920x1080 calibrated) at ¼ resolution."""
+    render_width: int = 640
+    """sim wrist-camera render width (before downsampling)"""
+    image_height: int = 80
+    """policy-input image height (after downsampling)"""
+    image_width: int = 144
+    """policy-input image width (after downsampling). 144/80 = 1.8 (≈ 16:9
+    1.778, within 1.2%). Sim renders 16:9 → area-resize 360×640 → 80×144;
+    real cam 1920×1080 → area-resize 1920×1080 → 80×144. Both pipelines apply
+    the same tiny non-uniform downsample, so the sim→real distortion is
+    matched. CNN flatten dim (H≥56 branch) = 64*6*14 = 5376."""
+    apply_jitter: bool = True
+    """applies color jitter to all input RGB observations (better for sim2real)"""
+
+    # Algorithm specific arguments
+    total_timesteps: int = 1_500_000
+    """total timesteps of the experiments"""
+    buffer_size: int = 1_000_000
+    """the replay memory buffer size"""
+    batch_size: int = 512
+    """the batch size of sample from the replay memory"""
+    num_updates: int = 256
+    """num updates per parallel env step"""
+    learning_starts: int = 5_000
+    """timestep to start learning"""
+    policy_lr: float = 3e-4
+    """the learning rate of the policy network optimizer"""
+    q_lr: float = 3e-4
+    """the learning rate of the Q network network optimizer"""
+    alpha_lr: float = 3e-4
+    """the learning rate of alpha for policy"""
+    policy_frequency: int = 4
+    """the frequency of training policy (delayed)"""
+    target_network_frequency: int = 1
+    """the frequency of updates for the target networks"""
+    alpha: float = 0.2
+    """Entropy regularization coefficient."""
+    autotune: bool = True
+    """automatic tuning of the entropy coefficient"""
+    bootstrap_at_done: str = "always"
+    """bootstrap method when episode ends. Options: ['always', 'never', 'on_truncation']"""
+    gamma: float = 0.9
+    """the discount factor gamma per step. 0.9 at 10 Hz (baseline 4398ce9 value)."""
+    tau: float = 0.01
+    """target smoothing coefficient"""
+    num_q: int = 10
+    """number of Q-networks in the critic ensemble. RLPD paper uses 10 by default."""
+    subset_size: int = 2
+    """RLPD sample-then-min: number of Q-networks sampled UNIFORMLY from the
+    ensemble per gradient step to form the conservative target (REDQ-style).
+    The target min is taken over this random subset only, not the full ensemble."""
+
+    # RLPD-specific arguments
+    offline_path: Optional[str] = None
+    """path or HF id of the offline demonstrations dataset. If None, RLPD runs as
+    pure online SAC + LayerNorm + big ensemble (i.e. degenerates to REDQ).
+    Supported formats: a local .pt file produced by rlpd_utils.save_offline_buffer,
+    OR an HF lerobot dataset id (e.g. 'Rsebti/projet3-demos-v1bis')."""
+    offline_ratio: float = 0.5
+    """RLPD symmetric sampling ratio. 0.5 = half the batch is sampled from the
+    offline buffer, half from the online buffer (canonical RLPD). 0.0 disables
+    offline data entirely (equivalent to setting offline_path=None)."""
+    offline_reward_mode: str = "sparse"
+    """How to label rewards on offline transitions when the demo source has no
+    dense reward. 'sparse' = 0 everywhere, +1 on success step. 'recompute' = use
+    the env's dense reward function on the recorded state (requires the demo
+    source to log enough state to reconstruct it). Start with 'sparse' — RLPD
+    handles mixed-reward batches fine."""
+
+    # Optimizations
+    compile: bool = True
+    """whether to use torch.compile."""
+    cudagraphs: bool = True
+    """whether to use cudagraphs on top of compile."""
+
+    # to be filled in runtime
+    num_total_iterations: int = 0
+    """the number of parallel envs steps given global total timesteps"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def evaluate(args, eval_envs, get_action_fn, logger, eval_output_dir, max_episode_steps, global_step, pbar):
+    torch.cuda.empty_cache()
+    stime = time.perf_counter()
+    eval_obs, _ = eval_envs.reset()
+    eval_metrics = defaultdict(list)
+
+    qpos_buffers = None
+    initial_state = None
+    if args.save_qpos:
+        qpos_buffers = [[] for _ in range(args.num_eval_envs)]
+        base_env = eval_envs.unwrapped
+        initial_state = {
+            "robot_qpos": base_env.agent.robot.get_qpos().detach().cpu().numpy(),
+            "cube_pose": base_env.item.pose.raw_pose.detach().cpu().numpy(),
+            "bin_pose": base_env.bin.pose.raw_pose.detach().cpu().numpy(),
+        }
+
+    for _ in range(max_episode_steps):
+        with torch.no_grad():
+            eval_action = get_action_fn(eval_obs['rgb'], eval_obs['state'])
+            eval_obs, _, _, _, eval_infos = eval_envs.step(eval_action)
+            if "final_info" in eval_infos:
+                mask = eval_infos["_final_info"]
+                for k, v in eval_infos["final_info"]["episode"].items():
+                    eval_metrics[f'eval/{k}'].append(v[mask])
+            if qpos_buffers is not None:
+                qpos = eval_envs.unwrapped.agent.robot.get_qpos().detach().cpu().numpy()
+                for i in range(args.num_eval_envs):
+                    qpos_buffers[i].append(qpos[i])
+
+    if qpos_buffers is not None:
+        qpos_dir = os.path.join(
+            os.path.dirname(eval_output_dir),
+            "test_qpos" if args.evaluate else "qpos",
+        )
+        init_dir = os.path.join(
+            os.path.dirname(eval_output_dir),
+            "test_initial_state" if args.evaluate else "initial_state",
+        )
+        os.makedirs(qpos_dir, exist_ok=True)
+        os.makedirs(init_dir, exist_ok=True)
+        for i, traj in enumerate(qpos_buffers):
+            if not traj:
+                continue
+            np.savetxt(
+                os.path.join(qpos_dir, f"episode_{i}.txt"),
+                np.stack(traj, axis=0),
+                fmt="%.6f",
+            )
+            with open(os.path.join(init_dir, f"episode_{i}.txt"), "w") as f:
+                f.write("# robot_qpos: 6 joint positions (rad)\n")
+                f.write("# cube_pose / bin_pose: x y z qw qx qy qz\n")
+                f.write("robot_qpos " + " ".join(f"{v:.6f}" for v in initial_state["robot_qpos"][i]) + "\n")
+                f.write("cube_pose " + " ".join(f"{v:.6f}" for v in initial_state["cube_pose"][i]) + "\n")
+                f.write("bin_pose " + " ".join(f"{v:.6f}" for v in initial_state["bin_pose"][i]) + "\n")
+
+    eval_d = {}
+    for k, v in eval_metrics.items():
+        eval_d[k] = torch.stack(v).float().mean()
+
+    pbar.set_description(
+        f"success_at_end: {eval_d['eval/success_at_end']:.2f}, "
+        f"success_once: {eval_d['eval/success_once']:.2f}, "
+        f"return: {eval_d['eval/return']:.2f}"
+    )
+    eval_time = time.perf_counter() - stime
+    eval_d["time/eval_time"] = eval_time
+
+    if args.track and args.capture_video:
+        video_files = glob.glob(f"{eval_output_dir}/*.mp4")
+        if video_files:
+            latest_video = max(video_files, key=os.path.getctime)
+            eval_d["eval/video"] = wandb.Video(latest_video, format="mp4")
+
+    logger.total_eval_time += eval_time
+    logger.log(d=eval_d, step=global_step)
+    return eval_d
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Network Modules
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _orthogonal_via_cpu(weight, gain=1.0):
+    # SAPIEN's CUDA init corrupts cuSOLVER state on Blackwell, segfaulting
+    # nn.init.orthogonal_ on GPU tensors. Init on CPU and copy back.
+    w_cpu = torch.empty_like(weight, device='cpu')
+    nn.init.orthogonal_(w_cpu, gain)
+    weight.copy_(w_cpu)
+
+
+def weight_init(m):
+    if isinstance(m, nn.Linear):
+        _orthogonal_via_cpu(m.weight.data)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        _orthogonal_via_cpu(m.weight.data, nn.init.calculate_gain('relu'))
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
+
+
+class CNNEncoder(nn.Module):
+    def __init__(self, n_obs, device=None):
+        super().__init__()
+        # n_obs is (H, W, C). Non-square inputs (e.g. 32x42 for the landscape
+        # wrist camera) are supported; the height is used as the dispatch key
+        # to pick a stride profile, then the resulting repr_dim is measured
+        # via a dummy forward so the projection layer can size to fit.
+        assert len(n_obs) == 3
+        self.num_channels = n_obs[2]
+        H, W = int(n_obs[0]), int(n_obs[1])
+        self.image_size = H
+
+        if H >= 56:
+            # Atari/DQN stride profile (8/4, 4/2, 3/1). Designed for 84x84,
+            # safe for any H >= 56 (yields >=3 in the spatial dim). The
+            # trailing Linear absorbs the width-dependent flatten size via
+            # the dummy-forward below. Examples:
+            #   64x... → 6x... (the original H=64 branch);
+            #   80x144 → 6x14 → 64*6*14 = 5376 flatten;
+            #   84x150 → 7x15 → 64*7*15 = 6720 flatten.
+            self.conv = nn.Sequential(
+                nn.Conv2d(self.num_channels, 32, 8, stride=4, device=device), nn.ReLU(),
+                nn.Conv2d(32, 64, 4, stride=2, device=device), nn.ReLU(),
+                nn.Conv2d(64, 64, 3, stride=1, device=device), nn.ReLU(),
+                nn.Flatten()
+            )
+        elif H in (32, 36):
+            # 32×42 (old 4:3) → flatten 1792.  36×64 (new 16:9) → flatten 3840.
+            # Same stride profile for both; the trailing Linear projection
+            # absorbs the size difference.
+            self.conv = nn.Sequential(
+                nn.Conv2d(self.num_channels, 32, 4, stride=2, device=device), nn.ReLU(),
+                nn.Conv2d(32, 64, 4, stride=2, device=device), nn.ReLU(),
+                nn.Conv2d(64, 64, 3, stride=1, device=device), nn.ReLU(),
+                nn.Flatten()
+            )
+        elif H == 16:
+            self.conv = nn.Sequential(
+                nn.Conv2d(self.num_channels, 32, 4, stride=2, device=device), nn.ReLU(),
+                nn.Conv2d(32, 64, 4, stride=1, device=device), nn.ReLU(),
+                nn.Flatten()
+            )
+        else:
+            raise ValueError(f"No CNN encoder supported for image height: {H}")
+
+        self.apply(weight_init)
+        self.conv = self.conv.to(memory_format=torch.channels_last)
+        # Measure flatten size for the given (H, W).
+        with torch.no_grad():
+            dummy = torch.zeros(1, self.num_channels, H, W, device=device)
+            dummy = dummy.contiguous(memory_format=torch.channels_last)
+            self.repr_dim = int(self.conv(dummy).shape[-1])
+
+    def forward(self, obs):
+        obs = obs.permute(0, 3, 1, 2)
+        obs = obs.contiguous(memory_format=torch.channels_last)
+        obs = obs / 255.0 - 0.5
+        return self.conv(obs)
+
+
+class Projection(nn.Module):
+    def __init__(self, n_obs, n_state, device=None):
+        super().__init__()
+        # rgb_proj output: kept at 50 even though we moved from 16x16 → 32x42 →
+        # 36x64 inputs. Empirically 50 trains better than 75 here: bigger
+        # bottleneck → more saturating Tanh units, weaker gradients, and ~25k
+        # extra downstream params (per SAC head ×4) that slow early
+        # convergence. The pressure of a tight bottleneck also helps sim2real.
+        self.repr_dim = 50 + 256
+        self.rgb_proj = nn.Sequential(
+            nn.Linear(n_obs, 50, device=device), nn.LayerNorm(50, device=device), nn.Tanh(),
+        )
+        self.state_proj = nn.Sequential(
+            nn.Linear(n_state, 256, device=device), nn.LayerNorm(256, device=device), nn.ReLU(),
+        )
+
+    def forward(self, rgb, state):
+        return torch.cat([self.rgb_proj(rgb), self.state_proj(state)], dim=-1)
+
+
+class Actor(nn.Module):
+    def __init__(self, env, n_obs, n_state, n_act, device=None):
+        super().__init__()
+        hidden_dim = 256
+        activ = nn.ReLU
+
+        self.proj = Projection(n_obs, n_state, device=device)
+        self.fc = nn.Sequential(
+            nn.Linear(self.proj.repr_dim, hidden_dim, device=device), nn.LayerNorm(hidden_dim, device=device), activ(),
+            nn.Linear(hidden_dim, hidden_dim, device=device), nn.LayerNorm(hidden_dim, device=device), activ(),
+            nn.Linear(hidden_dim, hidden_dim, device=device), nn.LayerNorm(hidden_dim, device=device), activ(),
+        )
+        self.fc_mean = nn.Linear(hidden_dim, n_act, device=device)
+        self.fc_logstd = nn.Linear(hidden_dim, n_act, device=device)
+
+        action_space = env.unwrapped.single_action_space
+        self.register_buffer("action_scale",
+            torch.tensor((action_space.high - action_space.low) / 2.0, dtype=torch.float32, device=device))
+        self.register_buffer("action_bias",
+            torch.tensor((action_space.high + action_space.low) / 2.0, dtype=torch.float32, device=device))
+
+        self.LOG_STD_MAX = 2
+        self.LOG_STD_MIN = -5
+        self.apply(weight_init)
+
+    def forward(self, rgb, state, get_log_std=False):
+        x = self.proj(rgb, state)
+        x = self.fc(x)
+        mean = self.fc_mean(x)
+        if get_log_std:
+            log_std = self.fc_logstd(x)
+            log_std = torch.tanh(log_std)
+            log_std = self.LOG_STD_MIN + 0.5 * (self.LOG_STD_MAX - self.LOG_STD_MIN) * (log_std + 1)
+            return mean, log_std
+        return mean
+
+    def get_eval_action(self, rgb, state):
+        mean = self.forward(rgb, state)
+        action = torch.tanh(mean) * self.action_scale + self.action_bias
+        return action
+
+    def get_action(self, rgb, state):
+        mean, log_std = self.forward(rgb, state, get_log_std=True)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std)
+        x_t = normal.rsample()
+        y_t = torch.tanh(x_t)
+        action = y_t * self.action_scale + self.action_bias
+        log_prob = normal.log_prob(x_t)
+        # Enforcing action bounds
+        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
+        log_prob = log_prob.sum(1, keepdim=True)
+        mean = torch.tanh(mean) * self.action_scale + self.action_bias
+        return action, log_prob, mean
+
+
+class Critic(nn.Module):
+    """RLPD scalar-Q Ensemble critic with vmap optimizations and LayerNorm.
+
+    RLPD (Ball et al. 2023) prescribes a large Q-ensemble with LayerNorm in every
+    hidden layer + sample-then-min on a random subset of size ``subset_size``
+    for the Bellman target. C51 distributional Q-values are NOT used by RLPD —
+    we use scalar Q with MSE TD loss.
+    """
+    def __init__(self, n_obs, n_state, n_act, num_q=10, device=None):
+        super().__init__()
+        self.num_q = num_q
+
+        self.proj = Projection(n_obs, n_state, device=device)
+        self.proj.apply(weight_init)
+
+        q_input_dim = self.proj.repr_dim + n_act
+
+        # Build Q-networks, apply weight init, then stack into q_params
+        q_nets = [self._build_q_network(q_input_dim, device=device) for _ in range(num_q)]
+        for qn in q_nets:
+            qn.apply(weight_init)
+
+        # q_params: registered stacked parameter container (what optimizer + vmap both use)
+        self.q_params = from_modules(*q_nets, as_module=True)
+
+        # Meta-device template for vmap dispatch (hidden from parameters()/state_dict())
+        object.__setattr__(self, '_q_meta', self._build_q_network(q_input_dim, device="meta"))
+
+        # Store architecture string for __repr__
+        object.__setattr__(self, '_q_repr', repr(q_nets[0]))
+
+    def __repr__(self):
+        """Pretty module printing"""
+        lines = [f"{self.__class__.__name__}("]
+        lines.append(f"  (proj): {self.proj}")
+        for i in range(self.num_q):
+            lines.append(f"  (q{i}): {self._q_repr}")
+        lines.append(")")
+        return "\n".join(lines)
+
+    def _build_q_network(self, input_dim, device=None):
+        """Build a single Q-network. Output dim = 1 (scalar Q), with LayerNorm
+        in every hidden layer per the RLPD recipe."""
+        hidden_dim = 512
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, device=device), nn.LayerNorm(hidden_dim, device=device), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim, device=device), nn.LayerNorm(hidden_dim, device=device), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim, device=device), nn.LayerNorm(hidden_dim, device=device), nn.ReLU(),
+            nn.Linear(hidden_dim, 1, device=device)
+        )
+
+    def _vmap_q(self, params, x):
+        """Single Q-network forward through meta template. Dispatched by vmap."""
+        with params.to_module(self._q_meta):
+            return self._q_meta(x)
+
+    def forward(self, rgb_features, state, actions):
+        """Batched forward over the full ensemble: [num_q, batch].
+
+        Full gradient flow through all Q-net params + the projection layer.
+        """
+        proj = self.proj(rgb_features, state)
+        x = torch.cat([proj, actions], dim=-1)
+        # vmap yields [num_q, batch, 1] → squeeze atoms dim to get [num_q, batch]
+        return torch.vmap(self._vmap_q, (0, None))(self.q_params, x).squeeze(-1)
+
+    def get_q_values(self, rgb_features, state, actions, detach_critic=False):
+        """Q-values: [num_q, batch].
+
+        Args:
+            detach_critic: If True, freezes critic weights (proj + Q-networks) while
+                preserving gradients through actions. Used for actor policy gradient.
+        """
+        if detach_critic:
+            with torch.no_grad():
+                proj = self.proj(rgb_features, state)
+            x = torch.cat([proj, actions], dim=-1)
+            return torch.vmap(self._vmap_q, (0, None))(self.q_params.data, x).squeeze(-1)
+        return self.forward(rgb_features, state, actions)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Deployment Wrapper
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DeployAgent(nn.Module):
+    """Standalone deployment wrapper for deploy.py file. Handles downsampling and inference."""
+
+    def __init__(self, sim_env, sample_obs, target_image_size=(36, 64), device=None):
+        super().__init__()
+        self.device = device
+        # Accept int (square) or (H, W).
+        if isinstance(target_image_size, int):
+            self.target_h, self.target_w = target_image_size, target_image_size
+        else:
+            self.target_h, self.target_w = int(target_image_size[0]), int(target_image_size[1])
+        self.target_image_size = (self.target_h, self.target_w)
+
+        n_act = np.prod(sim_env.unwrapped.single_action_space.shape)
+        n_obs_shape = sample_obs['rgb'].shape
+        c = n_obs_shape[3] if len(n_obs_shape) == 4 else n_obs_shape[2]
+        n_obs = (self.target_h, self.target_w, c)
+        n_state = np.prod(sample_obs['state'].shape[1:]) if len(sample_obs['state'].shape) > 1 else sample_obs['state'].shape[0]
+
+        self.encoder = CNNEncoder(n_obs, device)
+        self.actor = Actor(sim_env, n_obs=self.encoder.repr_dim, n_state=n_state, n_act=n_act, device=self.device)
+
+    def load_checkpoint(self, checkpoint, checkpoint_config=None, version=None):
+        if checkpoint.lower() == "wandb":
+            assert checkpoint_config is not None, "Need checkpoint_config to download from wandb"
+            cc = checkpoint_config
+            artifact_path = f"{cc['wandb_entity']}/{cc['wandb_project_name']}/model_{cc['agent_name']}_{cc['env_id']}_{cc['seed']}:{cc['version']}"
+            print(artifact_path)
+            local_path = Logger().download_checkpoint(artifact_path)
+            local_path = f"{local_path}/ckpt.pt"
+            ckpt = torch.load(local_path, map_location=self.device)
+        else:
+            ckpt = torch.load(checkpoint, map_location=self.device)
+        self.encoder.load_state_dict(ckpt['encoder'])
+        self.actor.load_state_dict(ckpt['actor'])
+        print(f"Loaded checkpoint from {checkpoint} at step {ckpt['global_step']}")
+
+    def downsample_rgb(self, rgb):
+        if rgb.shape[-3] == self.target_h and rgb.shape[-2] == self.target_w:
+            return rgb
+        squeeze = rgb.dim() == 3
+        if squeeze:
+            rgb = rgb.unsqueeze(0)
+        rgb = rgb.permute(0, 3, 1, 2).float()
+        rgb = F.interpolate(rgb, size=(self.target_h, self.target_w), mode='area')
+        rgb = rgb.permute(0, 2, 3, 1).to(torch.uint8)
+        if squeeze:
+            rgb = rgb.squeeze(0)
+        return rgb
+
+    def get_action(self, obs):
+        rgb = self.downsample_rgb(obs['rgb'])
+        with torch.no_grad():
+            rgb = self.encoder(rgb)
+            return self.actor.get_eval_action(rgb, obs['state'])
+
+    def forward(self, obs):
+        return self.get_action(obs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Logger
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Logger:
+    def __init__(self, log_wandb=False):
+        self.log_wandb = log_wandb
+        self.start_time = time.perf_counter()
+        self.total_eval_time = 0 # to subtract from total wall_time
+
+    @property
+    def wall_time(self):
+        return time.perf_counter() - self.start_time - self.total_eval_time
+
+    def log(self, d, step):
+        if self.log_wandb:
+            d["time/wall_time"] = self.wall_time
+            wandb.log(d, step=step)
+
+    def close(self):
+        if self.log_wandb:
+            wandb.finish()
+
+    def upload_checkpoint(self, model_path: str, model_name="model_checkpoint"):
+        if self.log_wandb:
+            artifact = wandb.Artifact(name=model_name, type="model")
+            artifact.add_file(model_path)
+            wandb.log_artifact(artifact)
+            artifact.wait()
+            print(f"Uploaded checkpoint {model_name} to wandb")
+
+    def download_checkpoint(self, artifact_path: str):
+        api = wandb.Api()
+        artifact = api.artifact(artifact_path)
+        artifact_dir = artifact.download()
+        run = artifact.logged_by()
+        local_time = datetime.fromisoformat(run.createdAt.replace('Z', '+00:00')).astimezone()
+        print(f"Downloaded checkpoint at {artifact_dir} from experiment: {run.config['exp_name']} at: {local_time}")
+        return artifact_dir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    args = tyro.cli(Args)
+    args.num_total_iterations = int(args.total_timesteps // args.num_envs)
+    assert args.num_updates > 0, "No updates will be made to the model with the current setup"
+
+    if args.exp_name is None:
+        args.exp_name = os.path.basename(__file__)[: -len(".py")]
+        run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    else:
+        run_name = args.exp_name
+    model_path = os.path.abspath(f"runs/{run_name}/ckpt.pt")
+    best_model_path = os.path.abspath(f"runs/{run_name}/ckpt_best.pt")
+    best_success_at_end = -1.0  # tracks the high-water mark for success_at_end
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+
+    # Seeding
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+
+    # ── Environment setup ──────────────────────────────────────────────────
+    env_kwargs = dict(obs_mode=args.obs_mode, render_mode=args.render_mode, sim_backend="gpu",
+                      sensor_configs=dict(width=args.render_width, height=args.render_height))
+    eval_env_kwargs = dict(obs_mode=args.obs_mode, render_mode=args.render_mode, sim_backend="gpu",
+                           sensor_configs=dict(width=args.render_width, height=args.render_height),
+                           human_render_camera_configs=dict(shader_pack="default", width=args.render_width, height=args.render_height))
+    if args.control_mode is not None:
+        env_kwargs["control_mode"] = args.control_mode
+        eval_env_kwargs["control_mode"] = args.control_mode
+    if args.env_domain_randomization:
+        env_kwargs["domain_randomization"] = True
+        eval_env_kwargs["domain_randomization"] = True
+    # Forward the shadows toggle through the per-env DR config. Merged into
+    # the env's default RandomizationConfig (shadows=True) so passing
+    # {"shadows": False} disables shadow-map allocation on every directional
+    # light — the difference between "fits on 96 GB" and "GPU OOM on scene
+    # build" at 1024 envs × 160-360 render.
+    dr_cfg_override = {"shadows": args.env_shadows}
+    env_kwargs["domain_randomization_config"] = dr_cfg_override
+    eval_env_kwargs["domain_randomization_config"] = dr_cfg_override
+    if "PlaceCube" in args.env_id:
+        env_kwargs["n_distractors"] = args.n_distractors
+        eval_env_kwargs["n_distractors"] = args.n_distractors
+        env_kwargs["use_real_bowl"] = args.use_real_bowl
+        eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
+        env_kwargs["action_smooth_coef"] = args.action_smooth_coef
+        eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
+        env_kwargs["pick_only_reward"] = args.pick_only_reward
+        eval_env_kwargs["pick_only_reward"] = args.pick_only_reward
+        env_kwargs["pick_side_approach"] = args.pick_side_approach
+        eval_env_kwargs["pick_side_approach"] = args.pick_side_approach
+        env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
+        eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
+        env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
+        eval_env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
+        env_kwargs["split_only_reward"] = args.split_only_reward
+        eval_env_kwargs["split_only_reward"] = args.split_only_reward
+        env_kwargs["split_target_gap"] = args.split_target_gap
+        eval_env_kwargs["split_target_gap"] = args.split_target_gap
+        env_kwargs["split_sep_coef"] = args.split_sep_coef
+        eval_env_kwargs["split_sep_coef"] = args.split_sep_coef
+        env_kwargs["split_hover_after_separate"] = args.split_hover_after_separate
+        eval_env_kwargs["split_hover_after_separate"] = args.split_hover_after_separate
+        env_kwargs["split_hover_z"] = args.split_hover_z
+        eval_env_kwargs["split_hover_z"] = args.split_hover_z
+        env_kwargs["split_hover_coef"] = args.split_hover_coef
+        eval_env_kwargs["split_hover_coef"] = args.split_hover_coef
+        env_kwargs["split_hover_tol"] = args.split_hover_tol
+        eval_env_kwargs["split_hover_tol"] = args.split_hover_tol
+        env_kwargs["split_color_hierarchy"] = args.split_color_hierarchy
+        eval_env_kwargs["split_color_hierarchy"] = args.split_color_hierarchy
+        env_kwargs["split_far_penalty_coef"] = args.split_far_penalty_coef
+        eval_env_kwargs["split_far_penalty_coef"] = args.split_far_penalty_coef
+        env_kwargs["split_far_penalty_dist"] = args.split_far_penalty_dist
+        eval_env_kwargs["split_far_penalty_dist"] = args.split_far_penalty_dist
+    # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
+    env_kwargs["sim_freq"] = args.sim_freq
+    eval_env_kwargs["sim_freq"] = args.sim_freq
+    env_kwargs["control_freq"] = args.control_freq
+    eval_env_kwargs["control_freq"] = args.control_freq
+    # Camera-lag DR override: set both to 0 to disable image latency entirely.
+    lag_range = (args.camera_lag_substeps_min, args.camera_lag_substeps_max)
+    env_kwargs.setdefault("domain_randomization_config", {})
+    eval_env_kwargs.setdefault("domain_randomization_config", {})
+    env_kwargs["domain_randomization_config"]["camera_lag_substeps_range"] = lag_range
+    eval_env_kwargs["domain_randomization_config"]["camera_lag_substeps_range"] = lag_range
+
+    _make_steps = args.eval_max_episode_steps if args.eval_max_episode_steps > 0 else None
+    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1,
+                    reconfiguration_freq=args.reconfiguration_freq,
+                    **({"max_episode_steps": _make_steps} if _make_steps else {}),
+                    **env_kwargs)
+    eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs,
+                         reconfiguration_freq=args.eval_reconfiguration_freq,
+                         **({"max_episode_steps": _make_steps} if _make_steps else {}),
+                         **eval_env_kwargs)
+    max_episode_steps = gym_utils.find_max_episode_steps_value(envs)
+
+    envs = FlattenRGBDObservationWrapper(envs, rgb=True, depth=False, state=True)
+    eval_envs = FlattenRGBDObservationWrapper(eval_envs, rgb=True, depth=False, state=True)
+
+    if (args.render_height, args.render_width) != (args.image_height, args.image_width):
+        envs = utils.DownsampleObsWrapper(envs, target_size=(args.image_height, args.image_width))
+        eval_envs = utils.DownsampleObsWrapper(eval_envs, target_size=(args.image_height, args.image_width))
+    if args.apply_jitter:
+        envs = utils.ColorJitterWrapper(envs)
+        eval_envs = utils.ColorJitterWrapper(eval_envs)
+    if isinstance(envs.action_space, gym.spaces.Dict):
+        envs = FlattenActionSpaceWrapper(envs)
+        eval_envs = FlattenActionSpaceWrapper(eval_envs)
+
+    eval_output_dir = None
+    if args.capture_video or args.save_trajectory:
+        eval_output_dir = f"runs/{run_name}/videos"
+        if args.evaluate:
+            eval_output_dir = f"runs/{run_name}/test_videos"
+        print(f"Saving eval trajectories/videos to {eval_output_dir}")
+        # Overlay the current goal color on each rendered frame before the recorder tiles them.
+        envs = utils.GoalColorOverlayWrapper(envs)
+        eval_envs = utils.GoalColorOverlayWrapper(eval_envs)
+        if args.save_train_video_freq is not None:
+            save_video_trigger = lambda x: (x // max_episode_steps) % args.save_train_video_freq == 0
+            envs = utils.ClockedRecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False,
+                                 save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=20)
+        eval_envs = utils.ClockedRecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory,
+                                  save_video=args.capture_video, trajectory_name="trajectory",
+                                  max_steps_per_video=max_episode_steps, video_fps=20)
+
+    envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
+    eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
+
+    n_act = math.prod(envs.unwrapped.single_action_space.shape)
+    n_channels = envs.unwrapped.single_observation_space['rgb'].shape[2]
+    n_obs = (args.image_height, args.image_width, n_channels)
+    n_state = math.prod(envs.unwrapped.single_observation_space['state'].shape)
+    assert isinstance(envs.unwrapped.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+
+    # ── Logger ─────────────────────────────────────────────────────────────
+    if not args.evaluate:
+        print("Running training")
+        if args.track:
+            config = vars(args)
+            config["env_cfg"] = dict(**env_kwargs, num_envs=args.num_envs, env_id=args.env_id,
+                                     reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=args.partial_reset)
+            config["eval_env_cfg"] = dict(**eval_env_kwargs, num_envs=args.num_eval_envs, env_id=args.env_id,
+                                          reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=args.eval_partial_reset)
+            wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=False,
+                       config=config, name=run_name, save_code=True, group=args.wandb_group,
+                       tags=[args.wandb_group, args.agent_name, args.env_id, f"seed={args.seed}"])
+    else:
+        print("Running evaluation")
+    logger = Logger(log_wandb=(args.track and not args.evaluate))
+
+    # ── Instantiate modules ────────────────────────────────────────────────
+
+    encoder = CNNEncoder(n_obs=n_obs, device=device)
+    actor = Actor(envs, n_obs=encoder.repr_dim, n_state=n_state, n_act=n_act, device=device)
+    critic = Critic(n_obs=encoder.repr_dim, n_state=n_state, n_act=n_act,
+                    num_q=args.num_q, device=device)
+
+    # Entropy tuning
+    if args.autotune:
+        target_entropy = -torch.prod(torch.Tensor(envs.unwrapped.single_action_space.shape).to(device)).item()
+        log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        alpha = log_alpha.detach().exp()
+        alpha_optimizer = optim.Adam([log_alpha], lr=args.alpha_lr, capturable=args.cudagraphs and not args.compile)
+    else:
+        alpha = torch.as_tensor(args.alpha, device=device)
+
+    # Load checkpoint. warm_start_offset carries the checkpoint's cumulative
+    # step so wandb curves of a warm-started run continue where the previous
+    # one ended (stacked end-to-end) instead of overlaying from 0. Control
+    # flow (eval timing, learning_starts) still uses the run-local global_step
+    # that starts at 0; only the *logged/saved* step is offset.
+    warm_start_offset = 0
+    if args.checkpoint is not None:
+        if args.checkpoint.lower() == "wandb":
+            artifact_path = f"{args.wandb_entity}/{args.wandb_project_name}/model_{args.agent_name}_{args.env_id}_{args.seed}:latest"
+            print(artifact_path)
+            local_path = logger.download_checkpoint(artifact_path)
+            local_path = f"{local_path}/ckpt.pt"
+            ckpt = torch.load(local_path, map_location=device)
+        else:
+            ckpt = torch.load(args.checkpoint, map_location=device)
+        encoder.load_state_dict(ckpt['encoder'])
+        actor.load_state_dict(ckpt['actor'])
+        critic.load_state_dict(ckpt['critic'])
+        if 'log_alpha' in ckpt:
+            with torch.no_grad():
+                log_alpha.copy_(ckpt['log_alpha'])
+                alpha.copy_(log_alpha.exp())
+        warm_start_offset = int(ckpt.get('global_step', 0))
+        print(f"Loaded checkpoint from {args.checkpoint} at step {warm_start_offset}")
+
+    # ── Inference copies (weight-sharing via from_module) ──────────────────
+
+    encoder_detach = CNNEncoder(n_obs=n_obs, device=device)
+    encoder_eval = CNNEncoder(n_obs=n_obs, device=device).eval()
+    from_module(encoder).data.to_module(encoder_detach)
+    from_module(encoder).data.to_module(encoder_eval)
+
+    actor_detach = Actor(envs, n_obs=encoder.repr_dim, n_state=n_state, n_act=n_act, device=device)
+    actor_eval = Actor(envs, n_obs=encoder.repr_dim, n_state=n_state, n_act=n_act, device=device).eval()
+    from_module(actor).data.to_module(actor_detach)
+    from_module(actor).data.to_module(actor_eval)
+
+    # Target critic
+    critic_target = Critic(n_obs=encoder.repr_dim, n_state=n_state, n_act=n_act,
+                           num_q=args.num_q, device=device)
+    critic_target.load_state_dict(critic.state_dict())
+    critic_online_params = list(critic.parameters())
+    critic_target_params = list(critic_target.parameters())
+
+    # ── Inference functions ────────────────────────────────────────────────
+
+    def get_rollout_action(rgb, state):
+        rgb_feat = encoder_detach(rgb)
+        action, _, _ = actor_detach.get_action(rgb_feat, state)
+        return action
+
+    def get_eval_action(rgb, state):
+        rgb_feat = encoder_eval(rgb)
+        return actor_eval.get_eval_action(rgb_feat, state)
+
+    # ── Optimizers ─────────────────────────────────────────────────────────
+
+    critic_optimizer = optim.Adam(list(critic.parameters()) + list(encoder.parameters()),
+                             lr=args.q_lr, capturable=args.cudagraphs and not args.compile)
+    actor_optimizer = optim.Adam(list(actor.parameters()),
+                                 lr=args.policy_lr, capturable=args.cudagraphs and not args.compile)
+
+    freeze_encoder_step = int(args.total_timesteps * args.freeze_encoder_after_frac) if args.freeze_encoder_after_frac > 0 else 0
+    critic_only_optimizer = None
+    if freeze_encoder_step > 0:
+        critic_only_optimizer = optim.Adam(list(critic.parameters()),
+                                 lr=args.q_lr, capturable=args.cudagraphs and not args.compile)
+
+    # ── Replay buffer ──────────────────────────────────────────────────────
+
+    # TODO: Buffer stores current and next observations, should only store one
+    buffer_mem = utils.calc_buffer_memory(
+        rgb_dim=np.prod(n_obs), 
+        state_dim=n_state, 
+        action_dim=n_act,
+        max_length=min(args.buffer_size, args.total_timesteps), 
+        rgb_dtype=np.uint8,
+    )
+    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device=device))
+
+    # ── Offline replay buffer (RLPD) ───────────────────────────────────────
+    # Symmetric sampling will draw `args.offline_ratio * args.batch_size` from
+    # this buffer at every grad step. If no offline source is supplied, the
+    # buffer stays empty and RLPD degenerates to REDQ (pure online).
+    offline_rb = None
+    offline_batch = 0
+    online_batch = args.batch_size
+    if args.offline_path is not None and args.offline_ratio > 0.0:
+        from rlpd_utils import load_offline_transitions
+        offline_transitions = load_offline_transitions(
+            args.offline_path,
+            obs_shape=n_obs,
+            state_dim=n_state,
+            action_dim=n_act,
+            reward_mode=args.offline_reward_mode,
+            device=device,
+        )
+        n_offline = offline_transitions.batch_size[0]
+        offline_rb = ReplayBuffer(storage=LazyTensorStorage(n_offline, device=device))
+        offline_rb.extend(offline_transitions)
+        offline_batch = max(1, int(round(args.batch_size * args.offline_ratio)))
+        online_batch = args.batch_size - offline_batch
+        print(f"RLPD: loaded {n_offline} offline transitions from {args.offline_path}; "
+              f"per-grad-step batch = {online_batch} online + {offline_batch} offline.")
+    elif args.offline_ratio > 0.0:
+        print("RLPD: no --offline_path provided, running as pure online (REDQ-equivalent).")
+
+    # ── Print summary ──────────────────────────────────────────────────────
+
+    print("-----------------------")
+    print(args)
+    print("-----------------------")
+    print("RLPD")
+    print("-----------------------")
+    for mod in [encoder, actor, critic]:
+        print(mod)
+    print(f"Task: {args.env_id}, Control mode: {envs.unwrapped._control_mode}")
+    print(f"Observations: {n_obs}, State: {n_state}, Actions: {n_act}")
+    print(f"Buffer memory required: {buffer_mem:.2f} GB")
+    print(f"Device: {device}")
+    print("-----------------------")
+
+    # ── Update functions ───────────────────────────────────────────────────
+
+    def update_main(data):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.no_grad():
+                next_obs = encoder(data["next_observations"]['rgb'])
+                next_state = data["next_observations"]['state']
+                next_state_actions, next_state_log_pi, _ = actor.get_action(next_obs, next_state)
+
+                bootstrap = (~data["dones"]).float().flatten()
+                discount = args.gamma
+                rewards = data["rewards"].flatten()
+
+                # RLPD sample-then-min: take the min over a random subset of the
+                # target Q-ensemble (REDQ-style). Subset size << num_q controls
+                # how conservative the target is. Subset indices vary per step.
+                next_q_all = critic_target(next_obs, next_state, next_state_actions)  # [num_q, B]
+                subset_idx = torch.randint(0, critic.num_q, (args.subset_size,), device=next_q_all.device)
+                next_q_subset = next_q_all.index_select(0, subset_idx)               # [subset, B]
+                next_q_min = next_q_subset.min(dim=0).values                          # [B]
+
+                # SAC target: r + gamma * (1 - done) * (min_Q - alpha * log_pi).
+                target_q = rewards + bootstrap * discount * (next_q_min - alpha * next_state_log_pi.flatten())
+
+            obs = encoder(data["observations"]['rgb'])
+            state = data["observations"]['state']
+
+            # All Q-networks regress against the same scalar target via MSE.
+            q_outputs = critic(obs, state, data["actions"])               # [num_q, B]
+            critic_loss = F.mse_loss(q_outputs, target_q.unsqueeze(0).expand_as(q_outputs))
+
+            with torch.no_grad():
+                q_max = q_outputs.max()
+                q_min = q_outputs.min()
+
+        # Update critic and encoder
+        critic_optimizer.zero_grad()
+        critic_loss.backward()
+        critic_optimizer.step()
+
+        if args.autotune:
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                with torch.no_grad():
+                    _, log_pi, _ = actor.get_action(obs, state)
+                alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+
+            # Update actor entropy
+            alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            alpha_optimizer.step()
+
+            alpha.copy_(log_alpha.detach().exp())
+        else:
+            alpha_loss = torch.tensor(0.0, device=device)
+
+        return TensorDict(critic_loss=critic_loss.detach(), q_max=q_max, q_min=q_min,
+                          alpha=alpha.detach(), alpha_loss=alpha_loss.detach(), 
+                          encoded_rgb=obs.detach())
+
+    def update_actor(data, encoded_rgb):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            state = data["observations"]["state"]
+            obs = encoded_rgb
+
+            pi, log_pi, _ = actor.get_action(obs, state)
+            q_values = critic.get_q_values(obs, state, pi, detach_critic=True)  # [num_q, B]
+
+            # RLPD actor uses the MIN over the FULL ensemble for the policy gradient.
+            # (The sample-then-min subset is only used on the BELLMAN target.)
+            critic_value = q_values.min(dim=0).values
+
+            actor_loss = (alpha * log_pi.flatten() - critic_value).mean()
+
+        # Update actor 
+        actor_optimizer.zero_grad()
+        actor_loss.backward()
+        actor_optimizer.step()
+
+        return TensorDict(actor_loss=actor_loss.detach())
+
+    # Frozen-encoder variant of update_main. Built only when freeze is enabled.
+    # Differences vs update_main: encoder forward wrapped in no_grad (no encoder
+    # gradients computed), and uses critic_only_optimizer (no encoder params).
+    # The next_obs branch was already in no_grad; we only change the obs branch.
+    def update_main_frozen(data):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.no_grad():
+                next_obs = encoder(data["next_observations"]['rgb'])
+                next_state = data["next_observations"]['state']
+                next_state_actions, next_state_log_pi, _ = actor.get_action(next_obs, next_state)
+
+                bootstrap = (~data["dones"]).float().flatten()
+                discount = args.gamma
+                rewards = data["rewards"].flatten()
+
+                next_q_all = critic_target(next_obs, next_state, next_state_actions)
+                subset_idx = torch.randint(0, critic.num_q, (args.subset_size,), device=next_q_all.device)
+                next_q_subset = next_q_all.index_select(0, subset_idx)
+                next_q_min = next_q_subset.min(dim=0).values
+
+                target_q = rewards + bootstrap * discount * (next_q_min - alpha * next_state_log_pi.flatten())
+
+                obs = encoder(data["observations"]['rgb'])
+
+            state = data["observations"]['state']
+
+            q_outputs = critic(obs, state, data["actions"])  # [num_q, B]
+            critic_loss = F.mse_loss(q_outputs, target_q.unsqueeze(0).expand_as(q_outputs))
+
+            with torch.no_grad():
+                q_max = q_outputs.max()
+                q_min = q_outputs.min()
+
+        critic_only_optimizer.zero_grad()
+        critic_loss.backward()
+        critic_only_optimizer.step()
+
+        if args.autotune:
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                with torch.no_grad():
+                    _, log_pi, _ = actor.get_action(obs, state)
+                alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+
+            alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            alpha_optimizer.step()
+
+            alpha.copy_(log_alpha.detach().exp())
+        else:
+            alpha_loss = torch.tensor(0.0, device=device)
+
+        return TensorDict(critic_loss=critic_loss.detach(), q_max=q_max, q_min=q_min,
+                          alpha=alpha.detach(), alpha_loss=alpha_loss.detach(),
+                          encoded_rgb=obs.detach())
+
+    # ── Compile & CudaGraphs ──────────────────────────────────────────────
+
+    if args.compile:
+        update_main = torch.compile(update_main)
+        update_actor = torch.compile(update_actor)
+        get_rollout_action = torch.compile(get_rollout_action)
+        get_eval_action = torch.compile(get_eval_action)
+        if freeze_encoder_step > 0:
+            update_main_frozen = torch.compile(update_main_frozen)
+
+    if args.cudagraphs:
+        update_main = CudaGraphModule(update_main)
+        update_actor = CudaGraphModule(update_actor)
+        if freeze_encoder_step > 0:
+            update_main_frozen = CudaGraphModule(update_main_frozen)
+
+    # ── Training loop ──────────────────────────────────────────────────────
+
+    obs, _ = envs.reset(seed=args.seed)
+    eval_envs.reset(seed=args.seed)
+
+    global_step = 0
+    pbar = tqdm.tqdm(total=args.total_timesteps, desc="steps")
+    max_ep_ret = -float("inf")
+    avg_returns = deque(maxlen=20)
+    desc = ""
+    d = {}
+    encoder_frozen = False
+
+    for iteration in range(args.num_total_iterations + 2):  # +2 for final eval
+        # Evaluate
+        if args.eval_freq > 0 and ((global_step - args.num_envs) // args.eval_freq) < (global_step // args.eval_freq):
+            cum_step = global_step + warm_start_offset
+            eval_d = evaluate(args, eval_envs, get_eval_action, logger, eval_output_dir,
+                              max_episode_steps, cum_step, pbar)
+            if args.evaluate:
+                break
+            if args.save_model:
+                ckpt_payload = {
+                    'encoder': encoder.state_dict(),
+                    'actor': actor.state_dict(),
+                    'critic': critic_target.state_dict(),
+                    'log_alpha': log_alpha,
+                    'global_step': cum_step,
+                }
+                torch.save(ckpt_payload, model_path)
+                # Per-eval history (one file per eval, never overwritten).
+                step_path = model_path.replace(
+                    "ckpt.pt", f"ckpt_step{cum_step:09d}.pt")
+                torch.save(ckpt_payload, step_path)
+                # Best-by-success_at_end (overwrites itself on new highs).
+                # SAC commonly collapses after a peak; this lets you recover the
+                # peak policy without manually scanning per-eval snapshots.
+                cur_success = float(eval_d.get('eval/success_at_end', -1.0))
+                msg_extra = ""
+                new_best = cur_success > best_success_at_end
+                if new_best:
+                    best_success_at_end = cur_success
+                    torch.save(ckpt_payload, best_model_path)
+                    msg_extra = f"  (NEW BEST success_at_end={cur_success:.3f})"
+                print(f"Step {cum_step}: ckpt saved to {model_path} and {step_path}{msg_extra}")
+                # Crash-safety: push the latest ckpt to wandb every eval (not
+                # just at training end). Same artifact name → wandb versions
+                # it (v0, v1, ... :latest) without exploding storage. Best
+                # ckpt is uploaded under a separate name when it changes.
+                if args.track:
+                    base = f"model_{args.agent_name}_{args.env_id}_{args.seed}"
+                    logger.upload_checkpoint(model_path=model_path, model_name=base)
+                    if new_best and os.path.exists(best_model_path):
+                        logger.upload_checkpoint(model_path=best_model_path, model_name=f"{base}_best")
+
+        # Collect
+        if global_step < args.learning_starts:
+            actions = envs.action_space.sample()
+        else:
+            actions = get_rollout_action(obs['rgb'], obs['state'])
+
+        next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+        real_next_obs = {'rgb': next_obs['rgb'].clone(), 'state': next_obs['state'].clone()}
+
+        # Determine bootstrap behavior 
+        if args.bootstrap_at_done == 'never':
+            need_final_obs = terminations | truncations
+            dones = terminations | truncations
+        elif args.bootstrap_at_done == 'always':
+            need_final_obs = terminations | truncations
+            dones = torch.zeros_like(terminations, dtype=torch.bool)
+        else: # 'on_truncation' - only stop bootstrap on true termination, bootstrap on truncation
+            need_final_obs = truncations & (~terminations)
+            dones = terminations
+
+        if "final_info" in infos:
+            real_next_obs['rgb'][need_final_obs] = infos["final_observation"]['rgb'][need_final_obs]
+            real_next_obs['state'][need_final_obs] = infos["final_observation"]['state'][need_final_obs]
+
+        transition = TensorDict(
+            observations=obs,
+            next_observations=real_next_obs,
+            actions=torch.as_tensor(actions, device=device, dtype=torch.float),
+            rewards=torch.as_tensor(rewards, device=device, dtype=torch.float),
+            dones=dones,
+            batch_size=rewards.shape[0],
+            device=device,
+        )
+        rb.extend(transition)
+
+        # Setting next as current obs
+        obs = next_obs
+
+        # Freeze encoder once we cross the configured fraction of training.
+        if freeze_encoder_step > 0 and not encoder_frozen and global_step >= freeze_encoder_step:
+            for p in encoder.parameters():
+                p.requires_grad = False
+            encoder.eval()
+            encoder_frozen = True
+            print(f"Step {global_step}: encoder frozen (no further CNN updates).")
+
+        # Training updates
+        if global_step > args.learning_starts:
+            for grad_step in range(args.num_updates):
+                # RLPD symmetric sampling: stitch the online and offline batches
+                # into one TensorDict so the compiled update sees a fixed-shape
+                # input every step (cudagraphs-friendly).
+                if offline_rb is not None:
+                    online_data = rb.sample(online_batch)
+                    offline_data = offline_rb.sample(offline_batch)
+                    data = torch.cat([online_data, offline_data], dim=0)
+                else:
+                    data = rb.sample(args.batch_size)
+
+                # update critic and encoder and actor entropy
+                out_main = update_main_frozen(data) if encoder_frozen else update_main(data)
+                encoded_rgb = out_main.pop("encoded_rgb", None)
+
+                # update actor (policy)
+                if grad_step % args.policy_frequency == 0:
+                    out_main.update(update_actor(data, encoded_rgb))
+
+                # update target networks
+                if grad_step % args.target_network_frequency == 0:
+                    with torch.no_grad():
+                        torch._foreach_lerp_(critic_target_params, critic_online_params, args.tau)
+
+                d.update(out_main)
+
+        # Log
+        if "final_info" in infos:
+            final_info = infos["final_info"]
+            done_mask = infos["_final_info"]
+            for k, v in final_info["episode"].items():
+                d[f"train/{k}"] = v[done_mask].float().mean()
+            # logging for terminal bar
+            max_ep_ret = max(infos["final_info"]["episode"]["return"][done_mask])
+            avg_returns.extend(infos["final_info"]["episode"]["return"][done_mask])
+            desc = f"global_step={global_step + warm_start_offset}, episodic_return={torch.tensor(avg_returns).mean(): 4.2f} (max={max_ep_ret: 4.2f})"
+            # Calculate wall_time metrics
+            sps = global_step / logger.wall_time
+            d["time/sps"] = sps
+            pbar.set_description(f"{sps: 4.4f} sps, " + desc)
+            logger.log(d=d, step=global_step + warm_start_offset)
+
+        # Increment counters
+        pbar.update(args.num_envs)
+        global_step += args.num_envs
+
+    # Upload final checkpoint(s) to wandb. Best ckpt goes under a separate
+    # artifact name so deploy.py can target either the final or peak policy.
+    if args.save_model:
+        base = f"model_{args.agent_name}_{args.env_id}_{args.seed}"
+        if os.path.exists(model_path):
+            logger.upload_checkpoint(model_path=model_path, model_name=base)
+        else:
+            print(f"WARNING: Checkpoint file not found at {model_path}, skipping upload")
+        if os.path.exists(best_model_path):
+            logger.upload_checkpoint(model_path=best_model_path, model_name=f"{base}_best")
+        else:
+            print(f"WARNING: Best checkpoint not found at {best_model_path}, skipping upload")
+
+    print("Finishing logger...")
+    logger.close()
+    print("Starting cleanup...")
+    try:
+        envs.close()
+        eval_envs.close()
+    except:
+        pass
+    print("Cleanup complete. Exiting.")
