@@ -1477,6 +1477,11 @@ class Place(DefaultCameraEnv):
             is_item_above_bin = inside_x & inside_y & is_cube_above_table
         else:
             is_item_above_bin = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
+            # inside_x / inside_y are returned in the info dict below; define
+            # zero placeholders so the dict build doesn't NameError in
+            # skip_bowl mode.
+            inside_x = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
+            inside_y = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
 
         item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
         is_item_static = item_vel <= 2e-2
