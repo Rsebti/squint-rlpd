@@ -1722,10 +1722,19 @@ class Place(DefaultCameraEnv):
                 / (gripper_max - gripper_min),
                 0.0, 1.0,
             )
-            pre_touch_reward = reach + self.pick_side_approach_open_coef * gripper_open
-            reward = torch.where(
-                self._fixed_finger_touched, normal_reward, pre_touch_reward
-            )
+            # Openness bonus runs continuously until grasp lands (not just
+            # until fixed-finger contact). Previously the bonus stopped at
+            # touch, so the touch event dropped the reward by open_coef
+            # before the grasp ladder caught up — creating a stable local
+            # minimum where the policy hovers near the cube without ever
+            # committing to contact. With the unified version, the
+            # transition pre-touch → post-touch → grasped is monotonic in
+            # reward (reach+open_coef → unchanged → 1+strong_grasp_coef).
+            # _fixed_finger_touched is still tracked (sticky) for logging /
+            # debug; no longer gates the reward shape.
+            pre_grasp_reward = reach + self.pick_side_approach_open_coef * gripper_open
+            grasped_reward = 1.0 + self.strong_grasp_coef * target_closure
+            reward = torch.where(is_grasped.bool(), grasped_reward, pre_grasp_reward)
         else:
             reward = normal_reward
 
