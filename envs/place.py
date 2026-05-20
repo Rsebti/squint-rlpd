@@ -252,7 +252,7 @@ class Place(DefaultCameraEnv):
         item_type="cube",
         n_distractors: int = 1,
         use_real_bowl: bool = True,
-        no_bowl: bool = False,
+        skip_bowl: bool = False,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
         domain_randomization_config: Union[
@@ -390,18 +390,18 @@ class Place(DefaultCameraEnv):
         self.item_type = item_type
         self.n_distractors = n_distractors
         self.use_real_bowl = use_real_bowl
-        # no_bowl: skip bowl actor entirely. Used to match offline demos
+        # skip_bowl: skip bowl actor entirely. Used to match offline demos
         # recorded without a bowl. Only valid with pick_only_reward (other
         # reward modes dereference self.bin.pose.p). Assertion below.
-        self.no_bowl = bool(no_bowl)
-        if self.no_bowl:
+        self.skip_bowl = bool(skip_bowl)
+        if self.skip_bowl:
             assert pick_only_reward, (
-                "no_bowl=True is only supported with pick_only_reward=True "
+                "skip_bowl=True is only supported with pick_only_reward=True "
                 "(other reward modes reference bin.pose.p which is None when "
-                "no_bowl=True). Either enable pick_only_reward or disable no_bowl."
+                "skip_bowl=True). Either enable pick_only_reward or disable skip_bowl."
             )
             assert not split_only_reward, (
-                "no_bowl=True is incompatible with split_only_reward."
+                "skip_bowl=True is incompatible with split_only_reward."
             )
 
         if self.split_only_reward:
@@ -761,11 +761,11 @@ class Place(DefaultCameraEnv):
 
         bins = []
         for i in range(self.num_envs):
-            # no_bowl mode: exit before creating any bin actor. bins stays
+            # skip_bowl mode: exit before creating any bin actor. bins stays
             # empty; self.bin is set to None below. Done as a break instead
             # of wrapping the for loop in an if/else so the original body
             # (and its indentation) stays untouched.
-            if self.no_bowl:
+            if self.skip_bowl:
                 break
             builder = self.scene.create_actor_builder()
             if self.use_real_bowl:
@@ -826,7 +826,7 @@ class Place(DefaultCameraEnv):
             bins.append(bin_actor)
             self.remove_from_state_dict_registry(bin_actor)
 
-        if self.no_bowl:
+        if self.skip_bowl:
             # bins is empty (loop broke before any actor build). Sentinel
             # value picked up by _initialize_episode / _get_obs* / evaluate.
             self.bin = None
@@ -1262,8 +1262,8 @@ class Place(DefaultCameraEnv):
             # Cube–bowl exclusion: cube center must be ≥ 10 cm from bowl
             # center (bowl rim is at 7.5 cm, +2.5 cm safety). Re-sample the
             # BOWL on conflict so the cube's LHS-spread structure is preserved.
-            # Skipped entirely in no_bowl mode (no bowl to avoid).
-            if not self.no_bowl:
+            # Skipped entirely in skip_bowl mode (no bowl to avoid).
+            if not self.skip_bowl:
                 BOWL_EXCLUSION = 0.10
                 for _ in range(20):
                     delta_xy = item_xy_world - bin_xy_world
@@ -1366,7 +1366,7 @@ class Place(DefaultCameraEnv):
                     for k, d_actor in enumerate(self.distractors):
                         self._set_actor_palette_color(d_actor, env_idx, distractor_idxs[:, k])
 
-            # Set bin pose. Skipped in no_bowl mode (self.bin is None).
+            # Set bin pose. Skipped in skip_bowl mode (self.bin is None).
             if self.bin is not None:
                 bin_xyz = torch.zeros((b, 3))
                 bin_xyz[:, :2] = bin_xy_world
@@ -1385,7 +1385,7 @@ class Place(DefaultCameraEnv):
                 goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx] + self.target_z_above_floor
                 self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
             else:
-                # no_bowl: park goal_site at origin (unused — pick_only_reward
+                # skip_bowl: park goal_site at origin (unused — pick_only_reward
                 # ignores goal_site, and it's a kinematic hidden actor).
                 goal_xyz = torch.zeros((b, 3), device=self.device)
                 self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
@@ -1409,10 +1409,10 @@ class Place(DefaultCameraEnv):
         # Bowl centre in the robot base frame (xyz). Appended last so it lands
         # at the end of the flattened state vector. In real-deploy the real
         # robot has no `.pose`; fall back to a fixed measured bowl position.
-        # no_bowl mode: zero-pad so the state-vector dim stays stable.
+        # skip_bowl mode: zero-pad so the state-vector dim stays stable.
         if getattr(self, "bin", None) is not None and hasattr(self.agent.robot, "pose"):
             obs["bowl_xyz_robot_frame"] = (self.agent.robot.pose.inv() * self.bin.pose).p
-        elif getattr(self, "no_bowl", False):
+        elif getattr(self, "skip_bowl", False):
             obs["bowl_xyz_robot_frame"] = torch.zeros(
                 qpos.shape[0], 3, dtype=qpos.dtype, device=qpos.device
             )
@@ -1424,7 +1424,7 @@ class Place(DefaultCameraEnv):
     def _get_obs_extra(self, info: dict):
         obs = dict()
         if self.obs_mode_struct.state:
-            # no_bowl: zero-pad the bin-related slices so the state-vector dim
+            # skip_bowl: zero-pad the bin-related slices so the state-vector dim
             # stays stable across modes. RGB is the primary policy input; the
             # privileged state slices are zero-padded in deploy and demo loads
             # too (see RLPD.md table), so this matches.
@@ -1462,7 +1462,7 @@ class Place(DefaultCameraEnv):
 
     def evaluate(self):
         item_pos = self.item.pose.p
-        # no_bowl: cube can never be "above bin" since there's no bin. Force
+        # skip_bowl: cube can never be "above bin" since there's no bin. Force
         # the boolean to False; bin_pos / offset / inside_* are skipped.
         if self.bin is not None:
             bin_pos = self.bin.pose.p.clone()
@@ -1494,7 +1494,7 @@ class Place(DefaultCameraEnv):
         is_robot_static = self.agent.is_static()
 
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
-        # no_bowl: no bin to touch; force the boolean to False.
+        # skip_bowl: no bin to touch; force the boolean to False.
         if self.bin is not None:
             robot_touching_bin = self.agent.is_touching(self.bin)
         else:
