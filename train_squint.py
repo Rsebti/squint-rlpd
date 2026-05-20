@@ -119,6 +119,26 @@ class Args:
     """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
     drop_penalty_coef: float = 0.0
     """Pick-only mode: penalty applied on every grasped→not-grasped transition (i.e., each drop). Default 0 = disabled; set e.g. 3.0 to penalise fumbles and push the policy to one-shot the grasp."""
+    split_only_reward: bool = False
+    """If True, switch the Place env to split-only mode: reward = reach nearest cube → push the two cubes apart → hold still; success = surface gap between the two cubes ≥ split_target_gap AND both cubes nearly static for 0.5 s. No grasping. Requires n_distractors >= 1. Mutually exclusive with pick_only_reward."""
+    split_target_gap: float = 0.03
+    """Split mode: target surface-to-surface gap (m) between the two cubes for success. Cube centers must reach 2·half_size + this (e.g. 0.03 m gap ≈ 0.05 m center-to-center for a ~2 cm cube)."""
+    split_sep_coef: float = 1.0
+    """Split mode: weight on the separation-progress reward term (per-step peak = 1 + this). Default 1.0 → reach (≤1) + separation (≤1) gives a per-step peak of 2.0."""
+    split_hover_after_separate: bool = False
+    """Split mode two-phase: once ALL cubes are separated (every pair ≥ split_target_gap), switch to a hover phase that drives the TCP (finger-tip midpoint) to split_hover_z above the GOAL cube. Success then requires separated + TCP at the hover point + cubes static. Default False = pure separate."""
+    split_hover_z: float = 0.05
+    """Split hover phase: height (m) the TCP must reach above the goal cube centre (default 5 cm)."""
+    split_hover_coef: float = 1.0
+    """Split hover phase: weight on the hover-approach reward (phase-2 per-step peak = 1 + split_sep_coef + this)."""
+    split_hover_tol: float = 0.015
+    """Split hover phase: TCP distance (m) to the hover point under which it counts as 'at hover' for success."""
+    split_color_hierarchy: bool = False
+    """Split curriculum: isolate cubes ONE at a time in a fixed color-priority order (lowest color index first), instead of pushing on the worst pairwise gap all at once. Easier signal for many cubes. Reach + isolate the current target, advance when it's ≥ split_target_gap from all others."""
+    split_far_penalty_coef: float = 0.0
+    """Split anti-fling penalty: −coef per cube further than split_far_penalty_dist from the cluster spawn centre (also gates success). 0 = off; set high (e.g. 10) to harshly discourage knocking cubes away."""
+    split_far_penalty_dist: float = 0.15
+    """Split anti-fling penalty: distance (m) from the cluster spawn centre beyond which a cube is 'flung' and penalised."""
     env_shadows: bool = True
     """If True, the DR env's directional lights cast shadows (extra GPU shadow-map allocation per env per directional light). Default True for max sim2real lighting variation. Set False when SAPIEN's parallel renderer can't allocate enough buffers (e.g. 1024+ envs × 360×640 render at default shader)."""
     sim_freq: int = 100
@@ -727,6 +747,26 @@ if __name__ == "__main__":
         eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
         env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
         eval_env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
+        env_kwargs["split_only_reward"] = args.split_only_reward
+        eval_env_kwargs["split_only_reward"] = args.split_only_reward
+        env_kwargs["split_target_gap"] = args.split_target_gap
+        eval_env_kwargs["split_target_gap"] = args.split_target_gap
+        env_kwargs["split_sep_coef"] = args.split_sep_coef
+        eval_env_kwargs["split_sep_coef"] = args.split_sep_coef
+        env_kwargs["split_hover_after_separate"] = args.split_hover_after_separate
+        eval_env_kwargs["split_hover_after_separate"] = args.split_hover_after_separate
+        env_kwargs["split_hover_z"] = args.split_hover_z
+        eval_env_kwargs["split_hover_z"] = args.split_hover_z
+        env_kwargs["split_hover_coef"] = args.split_hover_coef
+        eval_env_kwargs["split_hover_coef"] = args.split_hover_coef
+        env_kwargs["split_hover_tol"] = args.split_hover_tol
+        eval_env_kwargs["split_hover_tol"] = args.split_hover_tol
+        env_kwargs["split_color_hierarchy"] = args.split_color_hierarchy
+        eval_env_kwargs["split_color_hierarchy"] = args.split_color_hierarchy
+        env_kwargs["split_far_penalty_coef"] = args.split_far_penalty_coef
+        eval_env_kwargs["split_far_penalty_coef"] = args.split_far_penalty_coef
+        env_kwargs["split_far_penalty_dist"] = args.split_far_penalty_dist
+        eval_env_kwargs["split_far_penalty_dist"] = args.split_far_penalty_dist
     # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
     env_kwargs["sim_freq"] = args.sim_freq
     eval_env_kwargs["sim_freq"] = args.sim_freq
