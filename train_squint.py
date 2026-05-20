@@ -119,6 +119,12 @@ class Args:
     """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
     drop_penalty_coef: float = 0.0
     """Pick-only mode: penalty applied on every grasped→not-grasped transition (i.e., each drop). Default 0 = disabled; set e.g. 3.0 to penalise fumbles and push the policy to one-shot the grasp."""
+    split_only_reward: bool = False
+    """If True, switch the Place env to split-only mode: reward = reach nearest cube → push the two cubes apart → hold still; success = surface gap between the two cubes ≥ split_target_gap AND both cubes nearly static for 0.5 s. No grasping. Requires n_distractors >= 1. Mutually exclusive with pick_only_reward."""
+    split_target_gap: float = 0.03
+    """Split mode: target surface-to-surface gap (m) between the two cubes for success. Cube centers must reach 2·half_size + this (e.g. 0.03 m gap ≈ 0.05 m center-to-center for a ~2 cm cube)."""
+    split_sep_coef: float = 1.0
+    """Split mode: weight on the separation-progress reward term (per-step peak = 1 + this). Default 1.0 → reach (≤1) + separation (≤1) gives a per-step peak of 2.0."""
     env_shadows: bool = True
     """If True, the DR env's directional lights cast shadows (extra GPU shadow-map allocation per env per directional light). Default True for max sim2real lighting variation. Set False when SAPIEN's parallel renderer can't allocate enough buffers (e.g. 1024+ envs × 360×640 render at default shader)."""
     sim_freq: int = 100
@@ -727,6 +733,12 @@ if __name__ == "__main__":
         eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
         env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
         eval_env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
+        env_kwargs["split_only_reward"] = args.split_only_reward
+        eval_env_kwargs["split_only_reward"] = args.split_only_reward
+        env_kwargs["split_target_gap"] = args.split_target_gap
+        eval_env_kwargs["split_target_gap"] = args.split_target_gap
+        env_kwargs["split_sep_coef"] = args.split_sep_coef
+        eval_env_kwargs["split_sep_coef"] = args.split_sep_coef
     # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
     env_kwargs["sim_freq"] = args.sim_freq
     eval_env_kwargs["sim_freq"] = args.sim_freq

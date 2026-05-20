@@ -273,6 +273,13 @@ class Place(DefaultCameraEnv):
         pick_side_approach: bool = False,
         pick_side_approach_open_coef: float = 0.3,
         drop_penalty_coef: float = 0.0,
+        split_only_reward: bool = False,
+        split_target_gap: float = 0.03,
+        split_sep_coef: float = 1.0,
+        split_table_penalty_coef: float = 0.5,
+        split_bowl_penalty_coef: float = 3.0,
+        split_stable_speed_threshold: float = 0.02,
+        split_stable_duration_s: float = 0.5,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -317,6 +324,20 @@ class Place(DefaultCameraEnv):
         self._prev_is_grasped = None
         # Per-env consecutive-stable counter (pick-only mode). Init on _load_scene.
         self._grasp_slow_counter = None
+        # Split-only reward mode: train the policy to push the two cubes apart
+        # (no grasping) until the surface gap between them reaches
+        # split_target_gap, then hold both cubes still. Success terminates the
+        # episode early. Requires n_distractors >= 1. Mutually exclusive with
+        # pick_only_reward.
+        self.split_only_reward = bool(split_only_reward)
+        self.split_target_gap = float(split_target_gap)
+        self.split_sep_coef = float(split_sep_coef)
+        self.split_table_penalty_coef = float(split_table_penalty_coef)
+        self.split_bowl_penalty_coef = float(split_bowl_penalty_coef)
+        self.split_stable_speed_threshold = float(split_stable_speed_threshold)
+        self.split_stable_duration_s = float(split_stable_duration_s)
+        # Per-env consecutive-stable counter (split mode). Lazy init in evaluate.
+        self._split_slow_counter = None
         self._last_action = None
         self._just_reset_mask = None
         # Per-env state for the "stay at lift xy" reward: cube xy snapshotted
@@ -333,6 +354,18 @@ class Place(DefaultCameraEnv):
         self.item_type = item_type
         self.n_distractors = n_distractors
         self.use_real_bowl = use_real_bowl
+
+        if self.split_only_reward:
+            if self.pick_only_reward:
+                raise ValueError(
+                    "split_only_reward and pick_only_reward are mutually exclusive."
+                )
+            if not (self.item_type == "cube" and self.n_distractors >= 1):
+                raise ValueError(
+                    "split_only_reward requires a cube task with n_distractors >= 1 "
+                    f"(two cubes to separate). Got item_type={self.item_type!r}, "
+                    f"n_distractors={self.n_distractors}."
+                )
 
         # Robot-specific configuration
         if robot_uids == "so100":
@@ -1033,6 +1066,9 @@ class Place(DefaultCameraEnv):
             # Clear the prev-grasped flag used by the drop penalty.
             if self._prev_is_grasped is not None:
                 self._prev_is_grasped[env_idx] = False
+            # Clear the split-mode stable-separation counter for reset envs.
+            if self._split_slow_counter is not None:
+                self._split_slow_counter[env_idx] = 0
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1306,7 +1342,42 @@ class Place(DefaultCameraEnv):
         robot_touching_bin = self.agent.is_touching(self.bin)
         robot_touching_item = self.agent.is_touching(self.item)
 
-        if self.pick_only_reward:
+        # Inter-cube separation (split mode): distance between the goal cube and
+        # the first distractor. Zero when there is no distractor.
+        if self.n_distractors > 0 and len(self.distractors) > 0:
+            distractor_pos = self.distractors[0].pose.p
+            cube_separation = torch.linalg.norm(item_pos - distractor_pos, axis=1)
+            distractor_vel = torch.linalg.norm(
+                self.distractors[0].linear_velocity, axis=-1
+            )
+        else:
+            cube_separation = torch.zeros_like(item_vel)
+            distractor_vel = torch.zeros_like(item_vel)
+
+        if self.split_only_reward:
+            # Split success: surface gap (≈ center_dist − 2·half_size) ≥ target
+            # AND both cubes nearly static for N *consecutive* control steps.
+            # Any single bad step resets the counter (mirrors pick-only).
+            if self._split_slow_counter is None or self._split_slow_counter.shape[0] != item_pos.shape[0]:
+                self._split_slow_counter = torch.zeros(
+                    item_pos.shape[0], dtype=torch.int32, device=self.device
+                )
+            gap = cube_separation - 2.0 * self.item_half_sizes
+            separated = gap >= self.split_target_gap
+            cubes_slow = (item_vel < self.split_stable_speed_threshold) & (
+                distractor_vel < self.split_stable_speed_threshold
+            )
+            stable_split = separated & cubes_slow
+            self._split_slow_counter = torch.where(
+                stable_split,
+                self._split_slow_counter + 1,
+                torch.zeros_like(self._split_slow_counter),
+            )
+            split_steps_required = max(
+                1, int(round(self.split_stable_duration_s * self._control_freq))
+            )
+            success = self._split_slow_counter >= split_steps_required
+        elif self.pick_only_reward:
             # Pick-only success: grasped AND cube nearly stationary for N
             # *consecutive* control steps. Any single bad step resets the
             # counter, mirroring the lift.py pick_only_reward design.
@@ -1341,6 +1412,7 @@ class Place(DefaultCameraEnv):
             "robot_touching_table": robot_touching_table,
             "robot_touching_bin": robot_touching_bin,
             "robot_touching_item": robot_touching_item,
+            "cube_separation": cube_separation,
         }
 
     @property
@@ -1458,7 +1530,43 @@ class Place(DefaultCameraEnv):
         )
         return reward
 
+    def _compute_dense_reward_split(self, obs: Any, action: torch.Tensor, info: dict):
+        """Split reward: reach the nearest cube → push the two cubes apart
+        until the surface gap reaches split_target_gap → hold both cubes still.
+        No grasping. Episode auto-terminates on success (separated + both cubes
+        nearly static for split_stable_duration_s); the terminal bonus replaces
+        the remaining-step reward so terminating early matches a "stay at peak
+        forever" continuation, mirroring _compute_dense_reward_pick_only."""
+        item_pos = self.item.pose.p
+        distractor_pos = self.distractors[0].pose.p
+
+        # Reach the NEAREST of the two cubes so the policy can push it.
+        d_item = torch.linalg.norm(self.agent.tcp_pose.p - item_pos, axis=1)
+        d_dist = torch.linalg.norm(self.agent.tcp_pose.p - distractor_pos, axis=1)
+        reach = 1 - torch.tanh(5 * torch.minimum(d_item, d_dist))
+
+        # Separation progress: 0 at the touching start (gap≈0), 1 at the target
+        # surface gap. gap ≈ center_dist − 2·half_size (per-env cube size).
+        gap = info["cube_separation"] - 2.0 * self.item_half_sizes
+        sep_progress = torch.clamp(gap / self.split_target_gap, 0.0, 1.0)
+
+        reward = reach + self.split_sep_coef * sep_progress
+
+        # User-requested contact penalties: table + bowl (bin).
+        reward = reward - self.split_table_penalty_coef * info["robot_touching_table"].float()
+        reward = reward - self.split_bowl_penalty_coef * info["robot_touching_bin"].float()
+
+        # Terminal bonus, mirroring pick-only's accounting: per_step_peak ·
+        # remaining steps so an early success equals continuing at peak.
+        per_step_peak = 1.0 + self.split_sep_coef
+        max_steps = self._pick_only_max_steps
+        remaining = (max_steps - self.elapsed_steps.float()).clamp(min=0)
+        reward = torch.where(info["success"], per_step_peak * remaining, reward)
+        return reward
+
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        if self.split_only_reward:
+            return self._compute_dense_reward_split(obs, action, info)
         if self.pick_only_reward:
             return self._compute_dense_reward_pick_only(obs, action, info)
         # Baseline 4398ce9 reward (hard reset). Components:
