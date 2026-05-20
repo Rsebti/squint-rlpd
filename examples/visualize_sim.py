@@ -37,7 +37,7 @@ CONFIG = {
     ],
 
     # Environment settings
-    'num_envs': 4,
+    'num_envs': 10,
     'seed': 1,
     'obs_mode': 'rgb',  # No segmentation — wrist camera RGB only.
     'render_mode': 'rgb_array',
@@ -54,7 +54,13 @@ CONFIG = {
     # the displayed quality matches the real camera's quality.
     'downsample_size': None,
     'control_mode': None,
-    'domain_randomization': False,
+    # Mirror the training sim (train_squint.py defaults): DR on, pick-only
+    # reward, sim_freq=300 / control_freq=10, camera lag 1–5 substeps.
+    'domain_randomization': True,
+    'pick_only_reward': True,
+    'sim_freq': 300,
+    'control_freq': 10,
+    'camera_lag_substeps_range': (1, 5),
 
     # Visualization settings
     'window_size': 512,
@@ -88,6 +94,10 @@ def make_env(task: str, config: dict = CONFIG):
         'height': config['render_camera_height'],
     }
 
+    # DR showcase mode: every "looks" DR active (lighting, cube/robot colour,
+    # bowl tint, image pipeline noise/gain/gamma, wrist camera mount + lens
+    # jitter), arm pose kept fixed at the SO101 'start' keyframe so the only
+    # variation across envs is visual.
     env_kwargs = dict(
         obs_mode=config['obs_mode'],
         render_mode=config['render_mode'],
@@ -95,18 +105,39 @@ def make_env(task: str, config: dict = CONFIG):
         human_render_camera_configs=render_camera_size,
         num_envs=config['num_envs'],
         domain_randomization=config['domain_randomization'],
-        # Zero every DR that perturbs camera framing so what we see in the
-        # visualizer reflects the exact configured mount + keyframe across
-        # all envs. Other DR (lighting, cube colours, frictions, image
-        # pipeline) is unaffected.
+        sim_freq=config['sim_freq'],
+        control_freq=config['control_freq'],
         domain_randomization_config={
-            'wrist_camera_pos_noise': (0.0, 0.0, 0.0),
-            'wrist_camera_rot_noise': (0.0, 0.0, 0.0),
-            'wrist_camera_fov_noise': 0.0,
+            # Lock arm pose so the differences across the 10 cells are 100% visual.
             'initial_qpos_noise_scale': 0.0,
+            # Match training camera-lag distribution.
+            'camera_lag_substeps_range': config['camera_lag_substeps_range'],
+            # Brightness/lighting ranges now come from RandomizationConfig
+            # defaults (widened to span dark / sharp-shadow / bright-flat
+            # regimes). `shadows: True` is also the new training default.
+            # Per-episode HSV jitter on cube saturation/value/roughness/metallic/
+            # specular and bowl hue/sat/value is already on by default whenever
+            # domain_randomization=True. Robot colour is intentionally NOT
+            # randomized — the training default (near-black) is the only value
+            # the policy ever sees, so the visualizer matches.
         },
         reconfiguration_freq=None,
     )
+
+    # pick_only_reward lives on PlaceCube / LiftCube; gate so other tasks
+    # (e.g. Reach, Stack) that don't accept the kwarg don't fail.
+    if 'PlaceCube' in task or 'LiftCube' in task:
+        env_kwargs['pick_only_reward'] = config['pick_only_reward']
+        # randomize_item_color is a Place/Lift-specific knob (lives on
+        # PlaceRandomizationConfig / LiftRandomizationConfig).
+        env_kwargs['domain_randomization_config']['randomize_item_color'] = True
+
+    # Visualize the cube-spawn region as a red frame on the table and the
+    # robot frame as a big RGB triad at the base. PlaceCube-only knobs —
+    # Lift uses a different spawn config.
+    if 'PlaceCube' in task:
+        env_kwargs['visualize_spawn_area'] = True
+        env_kwargs['visualize_robot_frame'] = True
 
     if config['control_mode'] is not None:
         env_kwargs['control_mode'] = config['control_mode']

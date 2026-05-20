@@ -90,33 +90,41 @@ class RandomizationConfig:
     no surface detail. Set to "random" for per-episode randomization."""
     randomize_lighting: bool = True
     """Whether to randomize scene lighting per episode."""
+    shadows: bool = True
+    """If True, directional lights cast shadows (extra GPU pass per directional
+    light). Default True so the policy sees cast-shadow appearance under DR.
+    Set False to disable shadows for fast eval/no-DR runs."""
     # ══ Lighting DR — every "how bright is the env" knob lives in this block ══
     # Each episode the scene is lit by: a global ambient fill (the dominant
     # "room brightness"), a few directional lights (shading + shadows) and a
     # couple of point lights (local highlights). Every level is re-sampled per
     # episode, then all are scaled by one global exposure multiplier. The lights
     # are always WHITE — only their intensity is randomized, never their hue.
-    room_brightness_range: Sequence[float] = (0.05, 0.15)
-    """Per-episode ambient fill level — the global, uniform room brightness.
-    Halved (was (0.10, 0.30)) — at the old centre 0.20 + exposure 1.0 the
-    flat ambient was washing the diffuse-shaded cube faces; bringing it down
-    keeps the key/fill directionals visibly dominant so each face has a
-    distinct Lambertian shade. Mid = 0.10."""
-    exposure_range: Sequence[float] = (0.55, 1.45)
-    """Per-episode global exposure multiplier applied on top of every light."""
+    room_brightness_range: Sequence[float] = (0.0, 0.70)
+    """Per-episode ambient fill — savage range: 0 = pitch-black ambient
+    (only directionals visible), 0.70 = near-flood. Mid = 0.35."""
+    exposure_range: Sequence[float] = (0.25, 2.2)
+    """Per-episode global exposure multiplier — savage 9× span. Low end
+    gives a genuinely dim scene; high end blows highlights toward saturation."""
     num_directional_lights: int = 3
-    """Directional lights per sub-scene (light 0 is the brighter 'key' light)."""
-    directional_key_intensity_range: Sequence[float] = (0.45, 0.85)
-    """Key directional light intensity, before the exposure multiplier.
-    Raised together with the lowered ambient to drive a clear per-face
-    shading gradient (3–5× lit:shadow ratio)."""
-    directional_fill_intensity_range: Sequence[float] = (0.05, 0.25)
-    """Fill directional light intensity, before the exposure multiplier.
-    Kept above zero so the shadow side never goes pure-ambient flat."""
+    """Directional lights per sub-scene. Light 0 is the brightest 'key'; the
+    other 2 are 'fill' from independent random directions. Capped at 3 —
+    each shadow-casting light adds a per-env shadow map (GPU memory)."""
+    directional_key_intensity_range: Sequence[float] = (0.20, 1.80)
+    """Key directional light intensity (before exposure). Savage range —
+    low end ≈ no shadow, high end = harsh sun-style cast shadow."""
+    directional_fill_intensity_range: Sequence[float] = (0.0, 0.50)
+    """Fill directional light intensity (before exposure). Zero → sharp
+    one-sided shadow; up to 0.50 → multi-direction softer shadow."""
     num_point_lights: int = 2
     """Point lights per sub-scene, at random positions above the workspace."""
-    point_light_intensity_range: Sequence[float] = (0.0, 0.3)
-    """Per-episode per-point-light intensity, before the exposure multiplier."""
+    point_light_intensity_range: Sequence[float] = (0.0, 0.60)
+    """Per-episode per-point-light intensity (before exposure)."""
+    light_color_jitter: Sequence[float] = (0.70, 1.30)
+    """Per-channel (R, G, B) multiplier sampled INDEPENDENTLY per light per
+    episode. Default (0.70, 1.30) = ±30% per channel = real off-white
+    lighting (warm tungsten, cool LED, etc.). Set to (1.0, 1.0) to lock
+    lights to white (pre-savage behaviour)."""
     item_emission_range: Sequence[float] = (0.0, 0.1)
     """Per-episode emissive glow on the task cubes, as a fraction of their base
     color. Tightened from (0.05, 0.35) — the older range washed the base
@@ -179,12 +187,17 @@ class RandomizationConfig:
     # Applied to every RGB sensor frame BEFORE the policy sees it, to bracket
     # the photometric gap between PhysX-rendered images and real USB-cam
     # output (white balance, gamma, sensor noise, hue/sat drift).
-    image_noise_sigma_range: Sequence[float] = (0.0033, 0.0067)
-    """Per-episode std of additive Gaussian noise on RGB in [0,1] scale. Resampled each step from the same per-env sigma."""
-    image_channel_gain_range: Sequence[float] = (0.85, 1.15)
-    """Per-episode scalar luminance gain applied equally to R, G, B. Models exposure/brightness drift between cameras (no color cast)."""
-    image_gamma_range: Sequence[float] = (0.8, 1.2)
-    """Per-episode gamma exponent applied to pixel values in [0, 1]. <1 lightens, >1 darkens."""
+    image_noise_sigma_range: Sequence[float] = (0.0, 0.025)
+    """Per-episode std of additive Gaussian noise on RGB in [0,1] scale.
+    Savage range — high end ≈ 2.5% noise, matches a noisy webcam at high ISO.
+    Resampled each step from the same per-env sigma."""
+    image_channel_gain_range: Sequence[float] = (0.60, 1.50)
+    """Per-episode scalar luminance gain applied equally to R, G, B. Savage
+    ±50% — brackets webcam auto-exposure swings, dark-room captures, etc."""
+    image_gamma_range: Sequence[float] = (0.5, 1.7)
+    """Per-episode gamma exponent applied to pixel values in [0, 1]. Wide
+    range — <0.7 hard lightens, >1.4 hard darkens; brackets every consumer
+    camera's tone curve."""
     image_jpeg_quality_range: Sequence[float] = (50, 95)
     """Per-episode JPEG quality (used by the image-pipeline DR wrapper when JPEG roundtripping is enabled). NB: actual JPEG roundtrip is not yet wired into _apply_image_pipeline_dr because it requires a CPU bounce; left here as a hook for a future wrapper."""
     image_jpeg_probability: float = 0.2
@@ -278,7 +291,9 @@ class BaseRandomEnv(BaseEnv):
                     direction[2] = -abs(direction[2]) - 0.2  # always shine downward-ish
                 else:
                     direction = np.array([1.0, 1.0, -1.0]) if j == 0 else np.array([0.0, 0.0, -1.0])
-                dir_lights.append(self._add_directional_light(sub_scene, direction, [0.5, 0.5, 0.5]))
+                dir_lights.append(self._add_directional_light(
+                    sub_scene, direction, [0.5, 0.5, 0.5], shadow=cfg.shadows,
+                ))
 
             for j in range(cfg.num_point_lights if randomize else 0):
                 pos = rng.uniform([-0.2, -0.4, 0.25], [0.6, 0.4, 0.75])
@@ -291,7 +306,7 @@ class BaseRandomEnv(BaseEnv):
         self._randomize_lighting(torch.arange(len(self.scene.sub_scenes)))
 
     @staticmethod
-    def _add_directional_light(sub_scene, direction, color):
+    def _add_directional_light(sub_scene, direction, color, shadow=False):
         """Add a directional light to a single sub-scene, return its component.
 
         Mirrors ManiSkillScene.add_directional_light but keeps the handle so the
@@ -301,7 +316,7 @@ class BaseRandomEnv(BaseEnv):
         light = sapien.render.RenderDirectionalLightComponent()
         entity.add_component(light)
         light.color = list(color)
-        light.shadow = False
+        light.shadow = bool(shadow)
         light.pose = sapien.Pose([0, 0, 0], sapien.math.shortest_rotation([1, 0, 0], list(direction)))
         sub_scene.add_entity(entity)
         return light
@@ -356,21 +371,27 @@ class BaseRandomEnv(BaseEnv):
             amb = float(np.clip(rng.uniform(*cfg.room_brightness_range) * exposure, 0.0, 1.0))
             sub_scene.render_system.ambient_light = [amb, amb, amb]
 
-            # Directional lights: re-sample intensity + direction (white).
+            jl, jh = cfg.light_color_jitter
+
+            # Directional lights: re-sample intensity, direction, and per-channel tint.
+            # Each light gets independent (R, G, B) multipliers so the scene
+            # accumulates realistic off-white lighting (warm + cool mixed).
             for k, light in enumerate(self._dir_lights[i]):
                 lo, hi = (cfg.directional_key_intensity_range if k == 0
                           else cfg.directional_fill_intensity_range)
                 g = float(max(rng.uniform(lo, hi) * exposure, 0.0))
-                light.set_color([g, g, g])
+                tint = rng.uniform(jl, jh, size=(3,))
+                light.set_color([float(g * tint[0]), float(g * tint[1]), float(g * tint[2])])
                 direction = rng.uniform(-1.0, 1.0, size=(3,))
                 direction[2] = -abs(direction[2]) - 0.2
                 light.set_pose(sapien.Pose(
                     [0, 0, 0], sapien.math.shortest_rotation([1, 0, 0], direction.tolist())))
 
-            # Point lights: re-sample intensity + position (white).
+            # Point lights: re-sample intensity, position, and per-channel tint.
             for light in self._point_lights[i]:
                 g = float(max(rng.uniform(*cfg.point_light_intensity_range) * exposure, 0.0))
-                light.set_color([g, g, g])
+                tint = rng.uniform(jl, jh, size=(3,))
+                light.set_color([float(g * tint[0]), float(g * tint[1]), float(g * tint[2])])
                 pos = rng.uniform([-0.2, -0.4, 0.25], [0.6, 0.4, 0.75])
                 light.set_pose(sapien.Pose(pos.tolist()))
 

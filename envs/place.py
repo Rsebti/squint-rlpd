@@ -260,6 +260,11 @@ class Place(DefaultCameraEnv):
         domain_randomization=False,
         spawn_box_pos=[0.25, 0],
         spawn_box_half_size=0.10,
+        spawn_arc_center: Sequence[float] = (0.10, 0.0),
+        spawn_arc_radius: float = 0.30,
+        spawn_stratified: bool = True,
+        visualize_spawn_area: bool = False,
+        visualize_robot_frame: bool = False,
         action_smooth_coef: float = 0.0,
         strong_grasp_coef: float = 0.5,
         pick_only_reward: bool = False,
@@ -352,6 +357,21 @@ class Place(DefaultCameraEnv):
 
         self.spawn_box_pos = spawn_box_pos
         self.spawn_box_half_size = spawn_box_half_size
+        # Cube/bowl spawn region in robot frame: a half-disk of radius
+        # `spawn_arc_radius` centred at `spawn_arc_center`, occupying the +x
+        # hemisphere (the half "in front of" the robot). The flat side of the
+        # half-disk lies along the y-axis through the centre; the curved edge
+        # extends in +x. The cube and bowl xy are both sampled in this region.
+        self.spawn_arc_center = (float(spawn_arc_center[0]), float(spawn_arc_center[1]))
+        self.spawn_arc_radius = float(spawn_arc_radius)
+        # Latin-hypercube sampling across each batch of resetting envs in
+        # (r², θ) space — gives uniform area coverage with no two envs in
+        # the same r-band or θ-band per batch. With 2048 envs in a typical
+        # PPO reset that's 2048 radial bands of ~0.15 mm and 2048 angular
+        # bands of ~0.05° — effectively perfect even spread per batch.
+        self.spawn_stratified = bool(spawn_stratified)
+        self.visualize_spawn_area = bool(visualize_spawn_area)
+        self.visualize_robot_frame = bool(visualize_robot_frame)
 
         super().__init__(
             *args,
@@ -790,6 +810,95 @@ class Place(DefaultCameraEnv):
         self.goal_site = goal_builder.build_kinematic(name="goal_site")
         self._hidden_objects.append(self.goal_site)
 
+        if self.visualize_spawn_area:
+            self._add_spawn_area_marker()
+        if self.visualize_robot_frame:
+            self._add_robot_frame_marker()
+
+    def _add_spawn_area_marker(self, n_arc_segments: int = 24):
+        """Visual-only red half-disk outline marking the cube/bowl spawn region.
+
+        Anchored at `spawn_arc_center` (in robot frame). The curved boundary
+        (θ ∈ [-π/2, π/2]) is approximated by `n_arc_segments` thin chord
+        segments; the diameter (flat side, along y at x=0 in marker frame) is
+        a single thin box. Self-lit so it stays visible under the low-ambient
+        / dim-exposure tail of the lighting DR."""
+        cx, cy = self.spawn_arc_center
+        R = self.spawn_arc_radius
+        wall_t = 0.003           # 3 mm border thickness
+        wall_hz = 0.0025         # 5 mm total height
+        red_mat = sapien.render.RenderMaterial(
+            base_color=[1.0, 0.05, 0.05, 1.0],
+            emission=[1.0, 0.05, 0.05, 1.0],
+        )
+        builder = self.scene.create_actor_builder()
+
+        # Curved boundary: split θ ∈ [-π/2, +π/2] into N chord segments.
+        dtheta = np.pi / n_arc_segments
+        for i in range(n_arc_segments):
+            t0 = -np.pi / 2 + i * dtheta
+            t1 = t0 + dtheta
+            t_mid = 0.5 * (t0 + t1)
+            # Midpoint of the chord (on the arc itself; midpoint of the chord
+            # endpoints is slightly inside, but for small dtheta this offset
+            # is negligible — n=24 gives <0.3% error).
+            mx = float(R * np.cos(t_mid))
+            my = float(R * np.sin(t_mid))
+            # Tangent direction yaw = θ + π/2
+            yaw = float(t_mid + np.pi / 2)
+            # Chord length = 2R sin(Δθ/2)
+            half_chord = float(R * np.sin(dtheta / 2))
+            builder.add_box_visual(
+                pose=sapien.Pose(p=[mx, my, wall_hz], q=euler2quat(0, 0, yaw)),
+                half_size=[half_chord, wall_t, wall_hz],
+                material=red_mat,
+            )
+
+        # Flat side (diameter, along y at x=0 in marker frame), from y=-R to y=+R.
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, 0.0, wall_hz]),
+            half_size=[wall_t, R, wall_hz],
+            material=red_mat,
+        )
+
+        builder.initial_pose = sapien.Pose(p=[cx, cy, 0.0])
+        self.spawn_area_marker = builder.build_kinematic(name="spawn_area_marker")
+
+    def _add_robot_frame_marker(self, length: float = 0.20, radius: float = 0.008):
+        """Visual-only RGB triad at the world origin (= robot base for SO101)
+        showing the robot frame: red = +X, green = +Y, blue = +Z. SAPIEN
+        cylinders are along +X in their local frame; the Y and Z arrows are
+        rotated 90° around Z and -Y respectively. Self-lit so they stay
+        visible under the dim-exposure tail of the lighting DR."""
+        half_l = length / 2
+        red = sapien.render.RenderMaterial(
+            base_color=[1.0, 0.1, 0.1, 1.0], emission=[1.0, 0.1, 0.1, 1.0],
+        )
+        grn = sapien.render.RenderMaterial(
+            base_color=[0.1, 1.0, 0.1, 1.0], emission=[0.1, 1.0, 0.1, 1.0],
+        )
+        blu = sapien.render.RenderMaterial(
+            base_color=[0.2, 0.4, 1.0, 1.0], emission=[0.2, 0.4, 1.0, 1.0],
+        )
+        builder = self.scene.create_actor_builder()
+        # +X (red): cylinder's local axis = +X, centred at (half_l, 0, 0).
+        builder.add_cylinder_visual(
+            radius=radius, half_length=half_l, material=red,
+            pose=sapien.Pose(p=[half_l, 0, 0]),
+        )
+        # +Y (green): rotate +90° around Z to swing local +X → world +Y.
+        builder.add_cylinder_visual(
+            radius=radius, half_length=half_l, material=grn,
+            pose=sapien.Pose(p=[0, half_l, 0], q=euler2quat(0, 0, np.pi / 2)),
+        )
+        # +Z (blue): rotate -90° around Y to swing local +X → world +Z.
+        builder.add_cylinder_visual(
+            radius=radius, half_length=half_l, material=blu,
+            pose=sapien.Pose(p=[0, 0, half_l], q=euler2quat(0, -np.pi / 2, 0)),
+        )
+        builder.initial_pose = sapien.Pose(p=[0, 0, 0])
+        self.robot_frame_marker = builder.build_kinematic(name="robot_frame_marker")
+
     def _set_actor_palette_color(self, actor, env_idx, color_idxs):
         """Mutate the base_color of ``actor`` in-place, per env, to COLOR_PALETTE[idx]."""
         if actor is None:
@@ -933,7 +1042,7 @@ class Place(DefaultCameraEnv):
                 Pose.create_from_pq(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot))
             )
 
-            # Sample positions for item and bin
+            # Bin sampling center (unchanged): robot.pose + spawn_box_pos.
             spawn_center = self.agent.robot.pose.p + torch.tensor(
                 [self.spawn_box_pos[0], self.spawn_box_pos[1], 0]
             )
@@ -951,49 +1060,64 @@ class Place(DefaultCameraEnv):
                 item_radius = cluster_mult * hs + 0.01
             bin_radius = self.bin_radius.max().item() + 0.01
 
-            # Cube spawn region (unchanged): the original spawn_box.
-            cube_region = [
-                [-self.spawn_box_half_size, -self.spawn_box_half_size],
-                [self.spawn_box_half_size, self.spawn_box_half_size]
-            ]
-            cube_sampler = randomization.UniformPlacementSampler(
-                bounds=cube_region, batch_size=b, device=self.device
+            # Cube spawn — sample directly in the half-disk region in robot
+            # frame (radius `spawn_arc_radius` around `spawn_arc_center`, +x
+            # hemisphere only), with Latin-hypercube stratification on
+            # (r², θ) across this reset batch when self.spawn_stratified.
+            arc_cx, arc_cy = self.spawn_arc_center
+            arc_R = self.spawn_arc_radius
+            arc_center_world = self.agent.robot.pose.p[:, :2] + torch.tensor(
+                [arc_cx, arc_cy], device=self.device,
             )
-            item_xy_offset = cube_sampler.sample(item_radius, 100)
 
-            # Bowl spawn region: WIDER than the cube region on 3 sides — wider
-            # in y on both sides AND farther in +x. Keep the near-robot edge
-            # (−x, robot side) UNCHANGED so the bowl never gets closer to the
-            # robot than before. ±5 cm extra past the cube box on the 3 free
-            # sides gives the bowl more spatial variety without bringing it
-            # into a kinematically hard-to-reach pose.
-            BOWL_FAR_EXTRA   = 0.05   # +5 cm in +x (farther from robot)
-            BOWL_WIDTH_EXTRA = 0.05   # ±5 cm wider in y on both sides
-            bin_x_lo = -self.spawn_box_half_size                       # unchanged
-            bin_x_hi =  self.spawn_box_half_size + BOWL_FAR_EXTRA
-            bin_y_lo = -self.spawn_box_half_size - BOWL_WIDTH_EXTRA
-            bin_y_hi =  self.spawn_box_half_size + BOWL_WIDTH_EXTRA
-            bin_xy_offset = torch.zeros((b, 2), device=self.device)
-            bin_xy_offset[:, 0] = torch.rand(b, device=self.device) * (bin_x_hi - bin_x_lo) + bin_x_lo
-            bin_xy_offset[:, 1] = torch.rand(b, device=self.device) * (bin_y_hi - bin_y_lo) + bin_y_lo
+            def sample_half_disk(n: int, stratified: bool) -> torch.Tensor:
+                """Sample n (x, y) offsets uniformly in the half-disk of radius
+                arc_R centred at the origin, with θ ∈ [-π/2, +π/2] (+x side).
+                When stratified, performs LHS in (r², θ) space across the n
+                samples for even area coverage."""
+                if stratified and n > 1:
+                    perm_r = torch.randperm(n, device=self.device)
+                    perm_t = torch.randperm(n, device=self.device)
+                    u_r = (perm_r.float() + torch.rand(n, device=self.device)) / n
+                    u_t = (perm_t.float() + torch.rand(n, device=self.device)) / n
+                else:
+                    u_r = torch.rand(n, device=self.device)
+                    u_t = torch.rand(n, device=self.device)
+                # u_r → r so that r² is uniform in [0, R²] (uniform 2D area density).
+                r = arc_R * torch.sqrt(u_r)
+                theta = -np.pi / 2 + u_t * np.pi
+                return torch.stack([r * torch.cos(theta), r * torch.sin(theta)], dim=-1)
+
+            item_xy_offset = sample_half_disk(b, self.spawn_stratified)
+            # Bowl: same half-disk. Sampled uniformly (no LHS — keeping the
+            # cube's LHS spread is the priority; the bowl re-samples on
+            # collision below).
+            bin_xy_offset = sample_half_disk(b, stratified=False)
+
+            # Absolute world positions (both item and bin anchored at
+            # arc_center_world now).
+            item_xy_world = arc_center_world + item_xy_offset
+            bin_xy_world  = arc_center_world + bin_xy_offset
 
             # Cube–bowl exclusion: cube center must be ≥ 10 cm from bowl
-            # center (bowl rim is at 7.5 cm, +2.5 cm safety). Rejection loop
-            # re-samples only the envs whose cube fell too close. After the
-            # loop any remaining bad envs are pushed radially outward.
+            # center (bowl rim is at 7.5 cm, +2.5 cm safety). Re-sample the
+            # BOWL on conflict so the cube's LHS-spread structure is preserved.
             BOWL_EXCLUSION = 0.10
             for _ in range(20):
-                delta_xy = item_xy_offset - bin_xy_offset
+                delta_xy = item_xy_world - bin_xy_world
                 dist = torch.linalg.norm(delta_xy, dim=-1)
                 bad = dist < BOWL_EXCLUSION
                 if not bad.any():
                     break
-                new_offset = cube_sampler.sample(item_radius, 100)
-                item_xy_offset = torch.where(bad.unsqueeze(-1), new_offset, item_xy_offset)
-            # Hard fix for any holdouts: push radially away from bowl to the
-            # exclusion boundary (rare; shows up when the cube region is small
-            # and the bowl sits near the cube region's centre).
-            delta_xy = item_xy_offset - bin_xy_offset
+                n_bad = int(bad.sum().item())
+                bin_xy_offset[bad] = sample_half_disk(n_bad, stratified=False)
+                bin_xy_world = arc_center_world + bin_xy_offset
+            # Hard fix for any holdouts: push the BOWL radially away from the
+            # cube to the exclusion boundary (rare). The push direction is
+            # tangent-only when the conflict is exactly axial; otherwise away
+            # from the cube. May leave the bowl slightly outside the disk in
+            # degenerate cases — acceptable for the rare fallback.
+            delta_xy = bin_xy_world - item_xy_world
             dist = torch.linalg.norm(delta_xy, dim=-1, keepdim=True)
             still_bad = (dist < BOWL_EXCLUSION).squeeze(-1)
             if still_bad.any():
@@ -1001,14 +1125,17 @@ class Place(DefaultCameraEnv):
                     dist > 1e-6, delta_xy / dist.clamp(min=1e-6),
                     torch.tensor([1.0, 0.0], device=self.device).expand_as(delta_xy),
                 )
-                pushed = bin_xy_offset + direction * BOWL_EXCLUSION
-                item_xy_offset = torch.where(still_bad.unsqueeze(-1), pushed, item_xy_offset)
+                bin_xy_world = torch.where(
+                    still_bad.unsqueeze(-1),
+                    item_xy_world + direction * BOWL_EXCLUSION,
+                    bin_xy_world,
+                )
 
             # Cluster of (1 + n_distractors) cubes glued face-to-face. The
             # sampled position is the geometric center of the cluster, so the
             # goal cube can be ANY of the slots (center or any cardinal),
             # uniformly random — not always the middle one.
-            cluster_xy = spawn_center[env_idx, :2] + item_xy_offset
+            cluster_xy = item_xy_world
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             n_d = len(self.distractors)
 
@@ -1076,7 +1203,7 @@ class Place(DefaultCameraEnv):
 
             # Set bin pose
             bin_xyz = torch.zeros((b, 3))
-            bin_xyz[:, :2] = spawn_center[env_idx, :2] + bin_xy_offset
+            bin_xyz[:, :2] = bin_xy_world
             bin_xyz[:, 2] = self.bin_thickness / 2
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
