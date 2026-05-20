@@ -105,12 +105,44 @@ The real camera resolution stays at `1920×1080`; the downsample to
   motivation for the side-approach curriculum: gripper arrives slightly
   pre-closed, moving finger taps the cube top.
 - → Next experiments (changing **one** knob at a time vs this baseline):
-  1. `SIDE_APPROACH=true SIDE_APPROACH_OPEN_COEF=0.3` — addresses the
-     pre-closed gripper failure mode.
-  2. Wider cube size range in `PlaceRandomizationConfig.cube_half_size_range`
+  1. ✅ **`DROP_PENALTY_COEF=3.0`** — converged to the one-shot-grasp
+     behaviour the user wanted. See follow-up below.
+  2. `SIDE_APPROACH=true SIDE_APPROACH_OPEN_COEF=0.3` — addresses the
+     pre-closed gripper failure mode (untested).
+  3. Wider cube size range in `PlaceRandomizationConfig.cube_half_size_range`
      to better bracket the real cube.
-  3. `LATENCY=on` (10–50 ms camera lag) to add robustness if real-camera
+  4. `LATENCY=on` (10–50 ms camera lag) to add robustness if real-camera
      pipeline lag is suspected.
+
+## Variant: `eval1_pick_80x144_dropPen3` (drop-penalty 3.0)
+
+**Same config as the baseline + `DROP_PENALTY_COEF=3.0`** (penalty applied
+on every `is_grasped` True→False transition). Converged to the desired
+*one-shot* grasping behaviour — the policy commits to a single grasp
+attempt and avoids fumbles.
+
+- **Wandb run:** `fedecominelli04_robot/maniskill-so101/a2huk9qa`
+- **Checkpoint:** `runs/eval1_pick_80x144_dropPen3/ckpt.pt`, embedded
+  `global_step = 2,000,896`
+- **Trained:** stopped at ~2.15 M steps after convergence (run completed
+  ~2.7 k seconds wall time).
+
+Reward dynamics observed (eval/return, step-aligned vs baseline):
+
+| step    | baseline | dropPen3 | gap   |
+|---------|----------|----------|-------|
+| 0       | 1.00     | 0.96     | ≈0    |
+| 400 k   | 11.98    | 9.06     | −2.9  |
+| 800 k   | 13.22    | 9.43     | −3.8  |
+| 1.2 M   | 13.19    | 12.79    | −0.4  |
+| 2.0 M   | 13.22    | (converged) | — |
+
+Interpretation: at 400–800 k the policy was averaging ≈1 drop/episode
+(−3 per ep), then learned to one-shot the grasp by 1.2 M, eliminating
+the gap.
+
+To deploy this ckpt, use the same `infer.py` constants as the baseline
+(`IMAGE_H=80, IMAGE_W=144, CNN_FLATTEN_DIM=5376, RGB_PROJ_DIM=50`).
 
 ## Cross-references
 
