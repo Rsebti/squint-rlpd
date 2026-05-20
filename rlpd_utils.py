@@ -87,10 +87,28 @@ def load_offline_transitions(
             **(lerobot_kwargs or {}),
         )
 
+    # If the bundle was decoded with the full 58D layout but the env exposes
+    # a smaller state (e.g. 21D = noisy_qpos + controller_target + goal_color
+    # + bowl_xyz_robot_frame when privileged dims are hidden), slice the
+    # leading dims to match. The 21D prefix is exactly the env's state vector.
+    bundle_dim = td["observations", "state"].shape[-1]
+    if bundle_dim > state_dim:
+        td["observations", "state"] = td["observations", "state"][:, :state_dim].contiguous()
+        td["next_observations", "state"] = td["next_observations", "state"][:, :state_dim].contiguous()
+        print(f"Sliced offline bundle state {bundle_dim}D → {state_dim}D to match env.")
+
     _validate_transitions(td, obs_shape=obs_shape, state_dim=state_dim, action_dim=action_dim)
 
     if reward_mode == "sparse":
         td = _relabel_rewards_sparse(td)
+
+    # Drop any extra fields not in the online-buffer schema so that
+    # torch.cat([online_data, offline_data]) in train_rlpd.py works
+    # (it requires identical key sets in strict mode).
+    online_keys = {"observations", "next_observations", "actions", "rewards", "dones"}
+    for k in list(td.keys()):
+        if k not in online_keys:
+            del td[k]
 
     if device is not None:
         td = td.to(device)
@@ -301,14 +319,20 @@ def _load_lerobot_dataset(
     if target_c != 3:
         raise ValueError(f"Demo loader expects RGB (3 channels), got {target_c}.")
 
-    # Episode index list. The dataset always exposes
-    # `episode_data_index` = dict with "from"/"to" tensors of shape [num_episodes].
-    if hasattr(ds, "episode_data_index"):
+    # Episode index list. lerobot <0.4 exposed `episode_data_index` (a dict
+    # of tensors). lerobot >=0.4.3 moved this to `meta.episodes` (an HF
+    # Dataset with `dataset_from_index` / `dataset_to_index` columns). Same
+    # semantic: from is inclusive, to is exclusive.
+    if hasattr(ds, "episode_data_index") and ds.episode_data_index is not None:
         ep_from = ds.episode_data_index["from"].tolist()
         ep_to = ds.episode_data_index["to"].tolist()
-    else:  # pragma: no cover — older lerobot versions
+    elif getattr(ds, "meta", None) is not None and getattr(ds.meta, "episodes", None) is not None:
+        ep_from = list(ds.meta.episodes["dataset_from_index"])
+        ep_to = list(ds.meta.episodes["dataset_to_index"])
+    else:  # pragma: no cover
         raise RuntimeError(
-            "LeRobotDataset.episode_data_index missing — install lerobot>=0.4.3."
+            "LeRobotDataset exposes neither episode_data_index nor "
+            "meta.episodes — unsupported lerobot version."
         )
     num_episodes = len(ep_from)
 
@@ -392,8 +416,20 @@ def _load_lerobot_dataset(
         state[:, slice(*_STATE_SLICES["tcp_pose"])] = tcp_pose
         # bowl_xyz, item_pose, bin_pose, tcp_to_*, item_to_bin left at zero.
 
-        # --- Action: (target_rad - current_rad) / step_range, clipped ------
-        delta_rad = act_rad - qpos_rad
+        # --- Action: delta in controller TARGET, not in current qpos -------
+        # The sim controller is `pd_joint_target_delta_pos` with `use_target=True`
+        # (envs/robot/so101.py): target[t+1] = target[t] + action[t] * step_range.
+        # So the bundle's action[t] must be the diff between consecutive demo
+        # targets, NOT (target - current_qpos). Earlier versions did the latter,
+        # which clipped to 1.0 on slow joints (gripper) and made the sim target
+        # diverge by an order of magnitude from the demo.
+        # Exception: at frame 0 the sim controller initializes target = current
+        # qpos, so action[0] still uses (act_rad[0] - qpos_rad[0]).
+        T_ep = act_rad.shape[0]
+        delta_rad = np.zeros_like(act_rad)
+        delta_rad[0] = act_rad[0] - qpos_rad[0]
+        if T_ep > 1:
+            delta_rad[1:] = act_rad[1:] - act_rad[:-1]
         pre_norm_action_vals.extend(delta_rad.flatten().tolist())
         action_norm = np.clip(delta_rad / sim_step_range, -1.0, 1.0).astype(np.float32)
 

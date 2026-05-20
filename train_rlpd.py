@@ -8,6 +8,21 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 warnings.filterwarnings("ignore", message="Using lock_\\(\\) in a compiled graph")
 
+# wandb 0.24.2 has a bug in Server.query_with_timeout: when the viewer
+# endpoint returns flags=None (e.g. brand-new accounts without flags set),
+# `json.loads(self._viewer.get("flags", "{}"))` crashes because
+# `.get("flags", default)` returns None (not the default) when the key
+# is present with a None value. Monkey-patch before any wandb call.
+import json as _json
+import wandb.sdk.lib.server as _wb_server
+_orig_qwt = _wb_server.Server.query_with_timeout
+def _qwt_patched(self):
+    try:
+        _orig_qwt(self)
+    except TypeError:
+        self._flags = {}
+_wb_server.Server.query_with_timeout = _qwt_patched
+
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -646,12 +661,18 @@ class Logger:
             wandb.finish()
 
     def upload_checkpoint(self, model_path: str, model_name="model_checkpoint"):
-        if self.log_wandb:
-            artifact = wandb.Artifact(name=model_name, type="model")
-            artifact.add_file(model_path)
-            wandb.log_artifact(artifact)
-            artifact.wait()
-            print(f"Uploaded checkpoint {model_name} to wandb")
+        if not self.log_wandb:
+            return
+        # In offline mode wandb.log_artifact is a no-op and artifact.wait()
+        # raises ArtifactNotLoggedError. Local ckpt is already on disk —
+        # skip the upload silently.
+        if os.environ.get("WANDB_MODE", "").lower() == "offline":
+            return
+        artifact = wandb.Artifact(name=model_name, type="model")
+        artifact.add_file(model_path)
+        wandb.log_artifact(artifact)
+        artifact.wait()
+        print(f"Uploaded checkpoint {model_name} to wandb")
 
     def download_checkpoint(self, artifact_path: str):
         api = wandb.Api()
@@ -917,7 +938,11 @@ if __name__ == "__main__":
         max_length=min(args.buffer_size, args.total_timesteps), 
         rgb_dtype=np.uint8,
     )
-    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device=device))
+    # Buffer storage on CPU: on 12GB GPUs (e.g. RTX 5070) sapien already
+    # takes ~9 GB and the buffer-init `torch.empty_like` allocates the full
+    # `args.buffer_size` upfront. Keeping the storage on CPU frees the GPU
+    # for sim + model; sampled batches are transferred per-step (see below).
+    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device='cpu'))
 
     # ── Offline replay buffer (RLPD) ───────────────────────────────────────
     # Symmetric sampling will draw `args.offline_ratio * args.batch_size` from
@@ -937,7 +962,7 @@ if __name__ == "__main__":
             device=device,
         )
         n_offline = offline_transitions.batch_size[0]
-        offline_rb = ReplayBuffer(storage=LazyTensorStorage(n_offline, device=device))
+        offline_rb = ReplayBuffer(storage=LazyTensorStorage(n_offline, device='cpu'))
         offline_rb.extend(offline_transitions)
         offline_batch = max(1, int(round(args.batch_size * args.offline_ratio)))
         online_batch = args.batch_size - offline_batch
@@ -1225,6 +1250,10 @@ if __name__ == "__main__":
                     data = torch.cat([online_data, offline_data], dim=0)
                 else:
                     data = rb.sample(args.batch_size)
+                # Buffers live on CPU (see LazyTensorStorage init above); the
+                # rest of the update runs on GPU, so transfer the sampled
+                # batch here. No-op if the buffer is already on `device`.
+                data = data.to(device, non_blocking=True)
 
                 # update critic and encoder and actor entropy
                 out_main = update_main_frozen(data) if encoder_frozen else update_main(data)
