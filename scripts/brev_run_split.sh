@@ -19,10 +19,25 @@ set -euo pipefail
 export WANDB_API_KEY="${WANDB_API_KEY:-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}"
 
 # ── Split-specific knobs ────────────────────────────────────────────────────
-# SPLIT_TARGET_GAP: surface-to-surface gap (m) the two cubes must reach. The
-# cubes spawn touching (~2 cm centre-to-centre); 0.03 m gap ≈ 0.05 m centres.
+# SPLIT_TARGET_GAP: surface-to-surface gap (m) every pair of cubes must reach.
+# The cubes spawn touching (~2 cm centre-to-centre); 0.03 m gap ≈ 0.05 m centres.
 SPLIT_TARGET_GAP="${SPLIT_TARGET_GAP:-0.03}"
 SPLIT_SEP_COEF="${SPLIT_SEP_COEF:-1.0}"
+
+# SPLIT_HOVER: two-phase mode. When "true", once ALL cubes are separated the
+# policy must then drive the gripper mid-point SPLIT_HOVER_Z (m) above the GOAL
+# cube. "false" = pure separate.
+SPLIT_HOVER="${SPLIT_HOVER:-false}"
+SPLIT_HOVER_Z="${SPLIT_HOVER_Z:-0.05}"
+if [ "$SPLIT_HOVER" = "true" ]; then
+  HOVER_FLAG="--split_hover_after_separate"
+  HOVER_TAG="_hover"
+elif [ "$SPLIT_HOVER" = "false" ]; then
+  HOVER_FLAG="--no-split_hover_after_separate"
+  HOVER_TAG=""
+else
+  echo "ERROR: SPLIT_HOVER must be 'true' or 'false', got $SPLIT_HOVER" >&2; exit 1
+fi
 
 # ── Task / stage ────────────────────────────────────────────────────────────
 # Split is the eval2 setup: exactly two cubes (1 distractor). The reward
@@ -76,9 +91,12 @@ NUM_UPDATES="${NUM_UPDATES:-256}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
 
-EXP_NAME="${EXP_NAME:-eval2_split_80x144}"
+# Auto-name by cube count (= n_distractors + 1) and hover mode, e.g.
+# split_2cube_80x144, split_4cube_hover_80x144.
+NCUBES=$((N_DISTRACTORS + 1))
+EXP_NAME="${EXP_NAME:-split_${NCUBES}cube${HOVER_TAG}_80x144}"
 WANDB_PROJECT="${WANDB_PROJECT:-maniskill-so101}"
-WANDB_GROUP="${WANDB_GROUP:-SQUINT-SPLIT-eval2-$(date +%Y%m%d-%H%M)}"
+WANDB_GROUP="${WANDB_GROUP:-SQUINT-SPLIT-${NCUBES}cube${HOVER_TAG}-$(date +%Y%m%d-%H%M)}"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate squint
@@ -88,8 +106,8 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 echo ""
 echo "================================================================"
-echo "  Split run: $EXP_NAME"
-echo "  target_gap=$SPLIT_TARGET_GAP m   sep_coef=$SPLIT_SEP_COEF   shadows=$SHADOWS"
+echo "  Split run: $EXP_NAME   ($NCUBES cubes, hover=$SPLIT_HOVER)"
+echo "  target_gap=$SPLIT_TARGET_GAP m   sep_coef=$SPLIT_SEP_COEF   hover_z=$SPLIT_HOVER_Z m   shadows=$SHADOWS"
 echo "  sim_freq=$SIM_FREQ Hz   control_freq=$CONTROL_FREQ Hz   ep_steps=$EP_STEPS"
 echo "  cam_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX]"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
@@ -123,6 +141,8 @@ python train_squint.py \
     --no-pick_only_reward \
     --split_target_gap="$SPLIT_TARGET_GAP" \
     --split_sep_coef="$SPLIT_SEP_COEF" \
+    --split_hover_z="$SPLIT_HOVER_Z" \
+    $HOVER_FLAG \
     --track \
     --wandb_project_name="$WANDB_PROJECT" \
     --wandb_group="$WANDB_GROUP" \

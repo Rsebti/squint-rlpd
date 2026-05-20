@@ -280,6 +280,10 @@ class Place(DefaultCameraEnv):
         split_bowl_penalty_coef: float = 3.0,
         split_stable_speed_threshold: float = 0.02,
         split_stable_duration_s: float = 0.5,
+        split_hover_after_separate: bool = False,
+        split_hover_z: float = 0.05,
+        split_hover_coef: float = 1.0,
+        split_hover_tol: float = 0.015,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -336,8 +340,18 @@ class Place(DefaultCameraEnv):
         self.split_bowl_penalty_coef = float(split_bowl_penalty_coef)
         self.split_stable_speed_threshold = float(split_stable_speed_threshold)
         self.split_stable_duration_s = float(split_stable_duration_s)
+        # Two-phase split: once ALL cubes are separated, switch to a hover
+        # phase that drives the TCP (finger-tip midpoint) split_hover_z above
+        # the GOAL cube. Disabled by default (pure separate).
+        self.split_hover_after_separate = bool(split_hover_after_separate)
+        self.split_hover_z = float(split_hover_z)
+        self.split_hover_coef = float(split_hover_coef)
+        self.split_hover_tol = float(split_hover_tol)
         # Per-env consecutive-stable counter (split mode). Lazy init in evaluate.
         self._split_slow_counter = None
+        # Per-env sticky "all cubes separated this episode" flag (split mode).
+        # Lazy init in evaluate; reset per-episode in _initialize_episode.
+        self._all_separated_sticky = None
         self._last_action = None
         self._just_reset_mask = None
         # Per-env state for the "stay at lift xy" reward: cube xy snapshotted
@@ -1069,6 +1083,9 @@ class Place(DefaultCameraEnv):
             # Clear the split-mode stable-separation counter for reset envs.
             if self._split_slow_counter is not None:
                 self._split_slow_counter[env_idx] = 0
+            # Clear the sticky "all cubes separated" flag for reset envs.
+            if self._all_separated_sticky is not None:
+                self._all_separated_sticky[env_idx] = False
 
             # Random initial qpos
             self.agent.robot.set_qpos(
@@ -1342,32 +1359,54 @@ class Place(DefaultCameraEnv):
         robot_touching_bin = self.agent.is_touching(self.bin)
         robot_touching_item = self.agent.is_touching(self.item)
 
-        # Inter-cube separation (split mode): distance between the goal cube and
-        # the first distractor. Zero when there is no distractor.
-        if self.n_distractors > 0 and len(self.distractors) > 0:
-            distractor_pos = self.distractors[0].pose.p
-            cube_separation = torch.linalg.norm(item_pos - distractor_pos, axis=1)
-            distractor_vel = torch.linalg.norm(
-                self.distractors[0].linear_velocity, axis=-1
-            )
-        else:
-            cube_separation = torch.zeros_like(item_vel)
-            distractor_vel = torch.zeros_like(item_vel)
-
+        # ── Split mode: inter-cube separation over ALL pairs ────────────────
+        # min_gap = smallest surface gap (center_dist − 2·half_size) over every
+        # pair of cubes (goal + distractors). All cubes are "separated" when
+        # min_gap ≥ split_target_gap. Only computed in split mode.
+        cube_separation = torch.zeros_like(item_vel)
+        min_gap = torch.zeros_like(item_vel)
         if self.split_only_reward:
-            # Split success: surface gap (≈ center_dist − 2·half_size) ≥ target
-            # AND both cubes nearly static for N *consecutive* control steps.
-            # Any single bad step resets the counter (mirrors pick-only).
+            cube_pos = torch.stack(
+                [item_pos] + [d.pose.p for d in self.distractors], dim=1
+            )  # (E, C, 3)
+            cube_vel = torch.stack(
+                [item_vel]
+                + [torch.linalg.norm(d.linear_velocity, axis=-1) for d in self.distractors],
+                dim=1,
+            )  # (E, C)
+            C = cube_pos.shape[1]
+            pair_dist = torch.linalg.norm(
+                cube_pos[:, :, None, :] - cube_pos[:, None, :, :], axis=-1
+            )  # (E, C, C)
+            eye = torch.eye(C, dtype=torch.bool, device=self.device)
+            min_center_dist = pair_dist.masked_fill(eye, float("inf")).amin(dim=(1, 2))
+            cube_separation = min_center_dist
+            min_gap = min_center_dist - 2.0 * self.item_half_sizes
+            cubes_slow_all = (cube_vel < self.split_stable_speed_threshold).all(dim=1)
+
+            # Sticky "all cubes have been separated this episode" flag — gates
+            # the hover phase so the reward doesn't oscillate if a cube drifts.
+            if self._all_separated_sticky is None or self._all_separated_sticky.shape[0] != item_pos.shape[0]:
+                self._all_separated_sticky = torch.zeros(
+                    item_pos.shape[0], dtype=torch.bool, device=self.device
+                )
+            all_separated = min_gap >= self.split_target_gap
+            self._all_separated_sticky = self._all_separated_sticky | all_separated
+
             if self._split_slow_counter is None or self._split_slow_counter.shape[0] != item_pos.shape[0]:
                 self._split_slow_counter = torch.zeros(
                     item_pos.shape[0], dtype=torch.int32, device=self.device
                 )
-            gap = cube_separation - 2.0 * self.item_half_sizes
-            separated = gap >= self.split_target_gap
-            cubes_slow = (item_vel < self.split_stable_speed_threshold) & (
-                distractor_vel < self.split_stable_speed_threshold
-            )
-            stable_split = separated & cubes_slow
+            if self.split_hover_after_separate:
+                # Phase 2: the TCP (finger-tip midpoint) must reach
+                # split_hover_z above the GOAL cube while all cubes stay
+                # separated and nearly static.
+                hover_target = item_pos.clone()
+                hover_target[:, 2] = hover_target[:, 2] + self.split_hover_z
+                hover_dist = torch.linalg.norm(self.agent.tcp_pose.p - hover_target, axis=1)
+                stable_split = all_separated & (hover_dist < self.split_hover_tol) & cubes_slow_all
+            else:
+                stable_split = all_separated & cubes_slow_all
             self._split_slow_counter = torch.where(
                 stable_split,
                 self._split_slow_counter + 1,
@@ -1413,6 +1452,7 @@ class Place(DefaultCameraEnv):
             "robot_touching_bin": robot_touching_bin,
             "robot_touching_item": robot_touching_item,
             "cube_separation": cube_separation,
+            "min_gap": min_gap,
         }
 
     @property
@@ -1531,26 +1571,46 @@ class Place(DefaultCameraEnv):
         return reward
 
     def _compute_dense_reward_split(self, obs: Any, action: torch.Tensor, info: dict):
-        """Split reward: reach the nearest cube → push the two cubes apart
-        until the surface gap reaches split_target_gap → hold both cubes still.
-        No grasping. Episode auto-terminates on success (separated + both cubes
-        nearly static for split_stable_duration_s); the terminal bonus replaces
-        the remaining-step reward so terminating early matches a "stay at peak
+        """Split reward: push ALL cubes apart until every pair's surface gap
+        reaches split_target_gap. No grasping.
+
+        Phase 1 (until all separated): reach the NEAREST cube +
+            split_sep_coef·separation_progress (progress on the smallest gap).
+        Phase 2 (split_hover_after_separate=True, sticky once all separated):
+            hold the separated baseline (= phase-1 peak) and drive the TCP
+            (finger-tip midpoint) to split_hover_z above the GOAL cube. Phase-2
+            peak (1 + sep_coef + hover_coef) sits above phase-1 peak so the
+            policy is pulled forward into the hover.
+
+        Episode auto-terminates on success; the terminal bonus replaces the
+        remaining-step reward so terminating early matches a "stay at peak
         forever" continuation, mirroring _compute_dense_reward_pick_only."""
         item_pos = self.item.pose.p
-        distractor_pos = self.distractors[0].pose.p
+        tcp = self.agent.tcp_pose.p
 
-        # Reach the NEAREST of the two cubes so the policy can push it.
-        d_item = torch.linalg.norm(self.agent.tcp_pose.p - item_pos, axis=1)
-        d_dist = torch.linalg.norm(self.agent.tcp_pose.p - distractor_pos, axis=1)
-        reach = 1 - torch.tanh(5 * torch.minimum(d_item, d_dist))
+        # Reach the NEAREST cube (goal or any distractor) so the policy can push.
+        cube_pos = torch.stack(
+            [item_pos] + [d.pose.p for d in self.distractors], dim=1
+        )  # (E, C, 3)
+        reach = 1 - torch.tanh(
+            5 * torch.linalg.norm(cube_pos - tcp[:, None, :], axis=-1).amin(dim=1)
+        )
 
-        # Separation progress: 0 at the touching start (gap≈0), 1 at the target
-        # surface gap. gap ≈ center_dist − 2·half_size (per-env cube size).
-        gap = info["cube_separation"] - 2.0 * self.item_half_sizes
-        sep_progress = torch.clamp(gap / self.split_target_gap, 0.0, 1.0)
+        # Separation progress on the smallest pairwise gap: 0 at the touching
+        # start, 1 once every pair is ≥ split_target_gap apart.
+        sep_progress = torch.clamp(info["min_gap"] / self.split_target_gap, 0.0, 1.0)
+        phase1 = reach + self.split_sep_coef * sep_progress
 
-        reward = reach + self.split_sep_coef * sep_progress
+        if self.split_hover_after_separate:
+            hover_target = item_pos.clone()
+            hover_target[:, 2] = hover_target[:, 2] + self.split_hover_z
+            hover_reward = 1 - torch.tanh(5 * torch.linalg.norm(tcp - hover_target, axis=1))
+            phase2 = (1.0 + self.split_sep_coef) + self.split_hover_coef * hover_reward
+            reward = torch.where(self._all_separated_sticky, phase2, phase1)
+            per_step_peak = 1.0 + self.split_sep_coef + self.split_hover_coef
+        else:
+            reward = phase1
+            per_step_peak = 1.0 + self.split_sep_coef
 
         # User-requested contact penalties: table + bowl (bin).
         reward = reward - self.split_table_penalty_coef * info["robot_touching_table"].float()
@@ -1558,7 +1618,6 @@ class Place(DefaultCameraEnv):
 
         # Terminal bonus, mirroring pick-only's accounting: per_step_peak ·
         # remaining steps so an early success equals continuing at peak.
-        per_step_peak = 1.0 + self.split_sep_coef
         max_steps = self._pick_only_max_steps
         remaining = (max_steps - self.elapsed_steps.float()).clamp(min=0)
         reward = torch.where(info["success"], per_step_peak * remaining, reward)

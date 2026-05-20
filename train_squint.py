@@ -125,6 +125,14 @@ class Args:
     """Split mode: target surface-to-surface gap (m) between the two cubes for success. Cube centers must reach 2·half_size + this (e.g. 0.03 m gap ≈ 0.05 m center-to-center for a ~2 cm cube)."""
     split_sep_coef: float = 1.0
     """Split mode: weight on the separation-progress reward term (per-step peak = 1 + this). Default 1.0 → reach (≤1) + separation (≤1) gives a per-step peak of 2.0."""
+    split_hover_after_separate: bool = False
+    """Split mode two-phase: once ALL cubes are separated (every pair ≥ split_target_gap), switch to a hover phase that drives the TCP (finger-tip midpoint) to split_hover_z above the GOAL cube. Success then requires separated + TCP at the hover point + cubes static. Default False = pure separate."""
+    split_hover_z: float = 0.05
+    """Split hover phase: height (m) the TCP must reach above the goal cube centre (default 5 cm)."""
+    split_hover_coef: float = 1.0
+    """Split hover phase: weight on the hover-approach reward (phase-2 per-step peak = 1 + split_sep_coef + this)."""
+    split_hover_tol: float = 0.015
+    """Split hover phase: TCP distance (m) to the hover point under which it counts as 'at hover' for success."""
     env_shadows: bool = True
     """If True, the DR env's directional lights cast shadows (extra GPU shadow-map allocation per env per directional light). Default True for max sim2real lighting variation. Set False when SAPIEN's parallel renderer can't allocate enough buffers (e.g. 1024+ envs × 360×640 render at default shader)."""
     sim_freq: int = 100
@@ -739,6 +747,14 @@ if __name__ == "__main__":
         eval_env_kwargs["split_target_gap"] = args.split_target_gap
         env_kwargs["split_sep_coef"] = args.split_sep_coef
         eval_env_kwargs["split_sep_coef"] = args.split_sep_coef
+        env_kwargs["split_hover_after_separate"] = args.split_hover_after_separate
+        eval_env_kwargs["split_hover_after_separate"] = args.split_hover_after_separate
+        env_kwargs["split_hover_z"] = args.split_hover_z
+        eval_env_kwargs["split_hover_z"] = args.split_hover_z
+        env_kwargs["split_hover_coef"] = args.split_hover_coef
+        eval_env_kwargs["split_hover_coef"] = args.split_hover_coef
+        env_kwargs["split_hover_tol"] = args.split_hover_tol
+        eval_env_kwargs["split_hover_tol"] = args.split_hover_tol
     # Physics + control rate (passes through to BaseRandomEnv → SimConfig).
     env_kwargs["sim_freq"] = args.sim_freq
     eval_env_kwargs["sim_freq"] = args.sim_freq

@@ -72,6 +72,11 @@ export RENDER_WIDTH="${RENDER_WIDTH:-}"
 export SIM_FREQ="${SIM_FREQ:-}"
 export LATENCY="${LATENCY:-}"
 export SEED="${SEED:-}"
+# Split-task pass-throughs (used by scripts/brev_run_split.sh).
+export SPLIT_HOVER="${SPLIT_HOVER:-}"
+export SPLIT_TARGET_GAP="${SPLIT_TARGET_GAP:-}"
+export SPLIT_SEP_COEF="${SPLIT_SEP_COEF:-}"
+export SPLIT_HOVER_Z="${SPLIT_HOVER_Z:-}"
 
 REPO_DIR="$HOME/squint"
 SQUINT_REMOTE="https://github.com/fedecomi04/squint.git"
@@ -139,6 +144,10 @@ tmux new-session -d -s squint \
      export SIM_FREQ='$SIM_FREQ' && \
      export LATENCY='$LATENCY' && \
      export SEED='$SEED' && \
+     export SPLIT_HOVER='$SPLIT_HOVER' && \
+     export SPLIT_TARGET_GAP='$SPLIT_TARGET_GAP' && \
+     export SPLIT_SEP_COEF='$SPLIT_SEP_COEF' && \
+     export SPLIT_HOVER_Z='$SPLIT_HOVER_Z' && \
      bash $LAUNCHER 2>&1 | tee $HOME/training.log"
 
 echo ""
