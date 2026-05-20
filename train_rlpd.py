@@ -135,7 +135,9 @@ class Args:
     pick_side_approach_open_coef: float = 0.3
     """Coefficient on the gripper-openness reward during the pre-touch phase. Default 0.3 keeps the pre-touch peak (~1.3) below the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5) so the policy is incentivised to leave the pre-touch phase by touching."""
     strong_grasp_coef: float = 0.5
-    """Pick-only mode: coefficient on the strong-grasp closure bonus (rewards target_qpos[gripper] near min while grasped, AND scales the per-step terminal bonus = 1 + strong_grasp_coef). Bumping 0.5 → 1.0 makes the grasped state ~2x more attractive than hover (peak 2.0 vs 1.2-1.5), helping break the hover local minimum when the policy gets stuck above the cube without committing to contact."""
+    """Pick-only mode: coefficient on the strong-grasp closure bonus (rewards target_qpos[gripper] near min while grasped, AND scales the per-step terminal bonus = 1 + strong_grasp_coef). Bumping 0.5 → 1.0 makes the grasped state ~2x more attractive than hover (peak 2.0 vs 1.2-1.5), helping break the hover local minimum when the policy gets stuck above the cube without committing to contact. Ignored when --squint_native_reward is set."""
+    squint_native_reward: bool = False
+    """If True, use the squint-native-style reward for pick-only mode (based on squint's Lift task, adapted for grasp-only). Purely additive: reach + is_grasped + stable_floor + (open_coef·gripper_open·~grasped if pick_side_approach) - 3·table. Terminal bonus = 3 × remaining on success. Requires --pick_only_reward. Recommended for new runs — strictly exploit-free, simpler shape than the legacy reward, follows the published squint design."""
     drop_penalty_coef: float = 0.0
     """Pick-only mode: penalty applied on every grasped→not-grasped transition (i.e., each drop). Default 0 = disabled; set e.g. 3.0 to penalise fumbles and push the policy to one-shot the grasp."""
     split_only_reward: bool = False
@@ -754,6 +756,8 @@ if __name__ == "__main__":
         eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
         env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
         eval_env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
+        env_kwargs["squint_native_reward"] = args.squint_native_reward
+        eval_env_kwargs["squint_native_reward"] = args.squint_native_reward
         env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
         eval_env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
         env_kwargs["split_only_reward"] = args.split_only_reward

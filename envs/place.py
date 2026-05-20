@@ -275,6 +275,7 @@ class Place(DefaultCameraEnv):
         pick_stable_duration_s: float = 1.0,
         pick_side_approach: bool = False,
         pick_side_approach_open_coef: float = 0.3,
+        squint_native_reward: bool = False,
         drop_penalty_coef: float = 0.0,
         split_only_reward: bool = False,
         split_target_gap: float = 0.03,
@@ -332,6 +333,21 @@ class Place(DefaultCameraEnv):
         # Per-env state for the drop-penalty: previous step's is_item_grasped.
         # Lazy init on first reward call; reset to False on _initialize_episode.
         self._prev_is_grasped = None
+        # Squint-native-style reward (pick-only): squint native Lift reward
+        # shape (reach + is_grasped + stable_floor) + sim2real open-gripper
+        # bonus (gated on pick_side_approach + not_grasped). Purely additive,
+        # exploit-free, with phase jumps large enough to dominate hover. Only
+        # consulted when pick_only_reward=True.
+        self.squint_native_reward = bool(squint_native_reward)
+        if self.squint_native_reward:
+            assert pick_only_reward, (
+                "squint_native_reward=True requires pick_only_reward=True "
+                "(the success criterion and auto-terminate come from the "
+                "pick_only branch)."
+            )
+            assert not split_only_reward, (
+                "squint_native_reward is incompatible with split_only_reward."
+            )
         # Per-env consecutive-stable counter (pick-only mode). Init on _load_scene.
         self._grasp_slow_counter = None
         # Split-only reward mode: train the policy to push the two cubes apart
@@ -1661,11 +1677,114 @@ class Place(DefaultCameraEnv):
                 self._cached_pick_max_steps = 100  # PlaceCube default
         return self._cached_pick_max_steps
 
+    def _compute_dense_reward_pick_only_squint_native(
+        self, obs: Any, action: torch.Tensor, info: dict
+    ):
+        """Squint-native-style reward for pick-only (no lift, no place).
+
+        Based on the Lift task reward in https://github.com/aalmuzairee/squint
+        (envs/lift.py::compute_dense_reward), adapted for grasp-only:
+
+          squint Lift native:
+            reward = reach(1-tanh(5d)) + is_grasped + exp(-2·rest_dist)·grasped
+                     - 3·table - 1·(~item_lifted)
+
+          our adaptation (grasp-only, no return-to-rest, no lift requirement):
+            reward = reach + is_grasped + (1-tanh(10·item_vel))·is_grasped
+                     + open_coef·gripper_open·(~grasped)   [if pick_side_approach]
+                     - 3·table
+            terminal on success: (1+1+1) × remaining_steps
+
+        Component-wise:
+          - reach (1 − tanh(5·d)): squint native, max 1.0. Steep gradient
+            from far away, flat near 0 — relies on the +1 grasp jump (not on
+            reach gradient) to escape proximity plateaus.
+          - is_grasped (+1): squint native Lift phase jump. The dominant
+            signal that breaks the hover trap. Q(grasped) − Q(hover) ≈ +1/(1-γ)
+            ≈ +10 per step at γ=0.9.
+          - stable_floor (1 − tanh(10·||vel_item||)) · is_grasped: replaces
+            squint Lift's exp(−2·rest_dist) since we DON'T return to home pose
+            (FK/IK handles the place phase). Same purpose: incentivise holding
+            the cube still after grasp. Gated on is_grasped so it doesn't
+            reward an empty stationary gripper.
+          - open_reward (sim2real addition, opt-in via pick_side_approach):
+            open_coef · gripper_open · (1 − is_grasped). Encourages keeping
+            the gripper open during approach. Gated on (~is_grasped) so it
+            disappears at grasp and doesn't compete with the grasp_floor.
+          - table penalty (−3): squint native Lift coefficient.
+          - terminal on success: per_step_peak (= 3) × remaining_steps.
+            Compensates for auto-termination on success — without this, a
+            hover_forever episode (return ≈ 100·1.3 = 130) would beat an
+            early-success episode (return ≈ T·1.3 + 9 ≈ 50). The
+            multiplicative terminal makes early success strongly preferred.
+
+        Exploit audit:
+          - Push cube with TCP: reach uses ||TCP − cube_COM||, identical to
+            static contact → no extra reward.
+          - Fake grasp: gated by ManiSkill's agent.is_grasping() which checks
+            two-finger force/alignment, not fakeable from a single-finger
+            push.
+          - Slow movement without grasp: stable_floor multiplied by
+            is_grasped → zero if not grasped.
+          - Hover with open gripper indefinitely: bounded by reach(1) +
+            open(0.3) = 1.3 per step. Q(hover) ≈ 13 ≪ Q(grasp) ≈ 30+terminal.
+          - Drop + re-grasp cycle (chasing bonus): no ~item_lifted penalty
+            here (unlike Lift native), so no incentive to artificially lift.
+            The stable_floor only rewards still grasping, not high z.
+        """
+        # ── Reach (squint native Lift) ──────────────────────────────
+        tcp_to_item_dist = torch.linalg.norm(
+            self.agent.tcp_pose.p - self.item.pose.p, axis=1
+        )
+        reach_reward = 1 - torch.tanh(5 * tcp_to_item_dist)
+
+        # ── Grasp phase jump (squint native Lift = +1) ──────────────
+        is_grasped = info["is_item_grasped"].float()
+        grasp_floor = is_grasped
+
+        # ── Stable phase jump (replaces native return-to-rest term) ─
+        item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
+        stable_floor = (1.0 - torch.tanh(10.0 * item_vel)) * is_grasped
+
+        # ── Sim2real open-gripper bonus (opt-in via pick_side_approach)
+        if self.pick_side_approach:
+            gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
+            gripper_open = torch.clamp(
+                (self.agent.robot.get_qpos()[:, -1] - gripper_min)
+                / (gripper_max - gripper_min),
+                0.0, 1.0,
+            )
+            open_reward = (
+                self.pick_side_approach_open_coef * gripper_open * (1.0 - is_grasped)
+            )
+        else:
+            open_reward = torch.zeros_like(reach_reward)
+
+        # ── Combine (purely additive, squint-native style) ──────────
+        reward = reach_reward + grasp_floor + stable_floor + open_reward
+
+        # ── Penalty (squint native: -3 × touching_table) ────────────
+        reward = reward - 3.0 * info["robot_touching_table"].float()
+
+        # ── Terminal bonus: peak × remaining on info["success"] ────
+        per_step_peak = 3.0  # reach(1) + grasp(1) + stable(1)
+        max_steps = self._pick_only_max_steps
+        remaining = (max_steps - self.elapsed_steps.float()).clamp(min=0)
+        reward = torch.where(
+            info["success"], per_step_peak * remaining, reward
+        )
+        return reward
+
     def _compute_dense_reward_pick_only(self, obs: Any, action: torch.Tensor, info: dict):
         """Pick-only reward: reach → grasp → close-hard → stay still.
         Episode auto-terminates on success (grasped + slow for N consecutive
         control steps); terminal bonus replaces the remaining-step reward so
         terminating early matches "continue at peak forever" total return.
+
+        If squint_native_reward=True, dispatches to a cleaner squint-native
+        Lift-style reward (see _compute_dense_reward_pick_only_squint_native).
+        Recommended for new runs — strictly exploit-free and tracks the
+        published squint design.
 
         Side-approach curriculum (pick_side_approach=True): before the FIXED
         finger touches the cube, the reward is (reach + open_coef·gripper_open)
@@ -1675,6 +1794,14 @@ class Place(DefaultCameraEnv):
         ladder. open_coef defaults to 0.3 so pre-touch peak (~1.3) is below
         the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5);
         otherwise the policy would learn to hover and never touch."""
+        # Dispatch to the squint-native variant when opted in. Kept as an
+        # early branch so the legacy reward path below is untouched and
+        # existing checkpoints/runs remain reproducible.
+        if self.squint_native_reward:
+            return self._compute_dense_reward_pick_only_squint_native(
+                obs, action, info
+            )
+
         tcp_to_item_dist = torch.linalg.norm(
             self.agent.tcp_pose.p - self.item.pose.p, axis=1
         )
