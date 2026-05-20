@@ -89,6 +89,12 @@ class Args:
     """for cube tasks, number of distractor cubes to spawn alongside the target (0 = single block, 1 = goal + 1 distractor, up to 5 = full palette). Distractors get unique palette colors distinct from the goal. The 6-d goal-color one-hot is always passed to the policy regardless."""
     use_real_bowl: bool = True
     """If True (default), use the SAM-3D bowl mesh at envs/meshes/bowl.obj (CoACD-decomposed dynamic collider, ~15 cm diameter). Pass --no-use_real_bowl to fall back to the parametric rectangular bin. Use the mesh-rebuild script in scripts/mesh_bowl_from_ply.py to regenerate."""
+    skip_bowl: bool = False
+    """If True, skip spawning the bowl/bin actor entirely. Use this to match offline demos that were recorded without a bowl in scene (grasp-only teleop). Requires --pick_only_reward (other reward modes reference bin pose). bowl_xyz_robot_frame in the obs vector and bin-related info fields are zero-padded so the state-vector dim stays stable across modes."""
+    strong_grasp_coef: float = 0.5
+    """Pick-only mode: coefficient on the strong-grasp closure bonus (rewards target_qpos[gripper] near min while grasped, AND scales the per-step terminal bonus = 1 + strong_grasp_coef). Ignored when --squint_native_reward is set."""
+    squint_native_reward: bool = False
+    """If True, use the squint-native-style reward for pick-only mode (based on squint's Lift task, adapted for grasp-only). Purely additive: reach + is_grasped + stable_floor + (open_coef·gripper_open·~grasped if pick_side_approach) - 3·table. Terminal bonus = 3 × remaining on success. Requires --pick_only_reward."""
     num_envs: int = 2048
     """the number of parallel environments"""
     num_eval_envs: int = 16
@@ -737,6 +743,12 @@ if __name__ == "__main__":
         eval_env_kwargs["n_distractors"] = args.n_distractors
         env_kwargs["use_real_bowl"] = args.use_real_bowl
         eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
+        env_kwargs["skip_bowl"] = args.skip_bowl
+        eval_env_kwargs["skip_bowl"] = args.skip_bowl
+        env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
+        eval_env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
+        env_kwargs["squint_native_reward"] = args.squint_native_reward
+        eval_env_kwargs["squint_native_reward"] = args.squint_native_reward
         env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         env_kwargs["pick_only_reward"] = args.pick_only_reward
