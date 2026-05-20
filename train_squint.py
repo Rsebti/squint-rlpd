@@ -8,6 +8,21 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 warnings.filterwarnings("ignore", message="Using lock_\\(\\) in a compiled graph")
 
+# wandb 0.24.2 has a bug in Server.query_with_timeout: when the viewer
+# endpoint returns flags=None (e.g. brand-new accounts without flags set),
+# `json.loads(self._viewer.get("flags", "{}"))` crashes because
+# `.get("flags", default)` returns None (not the default) when the key
+# is present with a None value. Monkey-patch before any wandb call.
+import json as _json
+import wandb.sdk.lib.server as _wb_server
+_orig_qwt = _wb_server.Server.query_with_timeout
+def _qwt_patched(self):
+    try:
+        _orig_qwt(self)
+    except TypeError:
+        self._flags = {}
+_wb_server.Server.query_with_timeout = _qwt_patched
+
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
