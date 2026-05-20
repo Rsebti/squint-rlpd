@@ -189,6 +189,8 @@ class Args:
     """total timesteps of the experiments"""
     buffer_size: int = 1_000_000
     """the replay memory buffer size"""
+    buffer_on_cpu: bool = False
+    """if True, the replay buffer lives on CPU RAM (sampled batches moved to GPU per grad step). Set this when the GPU can't hold buffer_size + sim (e.g. RTX 5070 12 GB)."""
     batch_size: int = 512
     """the batch size of sample from the replay memory"""
     num_updates: int = 256
@@ -938,11 +940,11 @@ if __name__ == "__main__":
         max_length=min(args.buffer_size, args.total_timesteps), 
         rgb_dtype=np.uint8,
     )
-    # Buffer storage on CPU: on 12GB GPUs (e.g. RTX 5070) sapien already
-    # takes ~9 GB and the buffer-init `torch.empty_like` allocates the full
-    # `args.buffer_size` upfront. Keeping the storage on CPU frees the GPU
-    # for sim + model; sampled batches are transferred per-step (see below).
-    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device='cpu'))
+    # On a small GPU (e.g. 12 GB), set this to 'cpu' — sapien already takes
+    # ~9 GB and the buffer init allocates `args.buffer_size` upfront. The
+    # `.to(device)` after sample is a no-op when buffer is already on GPU.
+    _buffer_device = "cpu" if args.buffer_on_cpu else device
+    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device=_buffer_device))
 
     # ── Offline replay buffer (RLPD) ───────────────────────────────────────
     # Symmetric sampling will draw `args.offline_ratio * args.batch_size` from
@@ -962,7 +964,7 @@ if __name__ == "__main__":
             device=device,
         )
         n_offline = offline_transitions.batch_size[0]
-        offline_rb = ReplayBuffer(storage=LazyTensorStorage(n_offline, device='cpu'))
+        offline_rb = ReplayBuffer(storage=LazyTensorStorage(n_offline, device=_buffer_device))
         offline_rb.extend(offline_transitions)
         offline_batch = max(1, int(round(args.batch_size * args.offline_ratio)))
         online_batch = args.batch_size - offline_batch
