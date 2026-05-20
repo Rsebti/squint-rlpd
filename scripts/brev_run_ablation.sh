@@ -101,6 +101,18 @@ else
   echo "ERROR: SHADOWS must be 'true' or 'false', got $SHADOWS" >&2; exit 1
 fi
 
+# Warm-start: path to a checkpoint to load encoder/actor/critic/log_alpha
+# from before training (or the literal "wandb" to pull the agent's :latest
+# artifact). Empty = train from scratch. The render resolution does NOT
+# affect the network, so a ckpt trained at one render res loads cleanly at
+# another — used to change render/num_envs without losing the learned policy.
+CHECKPOINT="${CHECKPOINT:-}"
+if [ -n "$CHECKPOINT" ]; then
+  CHECKPOINT_FLAG="--checkpoint=$CHECKPOINT"
+else
+  CHECKPOINT_FLAG=""
+fi
+
 ENV_ID="${ENV_ID:-SO101PlaceCube-v1}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-36}"
@@ -142,7 +154,7 @@ echo "  latency=$LATENCY (camera_lag substeps in [$CAM_LAG_MIN, $CAM_LAG_MAX])"
 echo "  seed=$SEED  n_distractors=$N_DISTRACTORS  total=$TOTAL_TIMESTEPS"
 echo "  num_envs=$NUM_ENVS  num_eval_envs=$NUM_EVAL_ENVS  buffer=$BUFFER_SIZE"
 echo "  num_updates=$NUM_UPDATES  batch_size=$BATCH_SIZE"
-echo "  image=${IMAGE_HEIGHT}x${IMAGE_WIDTH}   render=${RENDER_HEIGHT}x${RENDER_WIDTH}"
+echo "  image=${IMAGE_HEIGHT}x${IMAGE_WIDTH}   render=${RENDER_HEIGHT}x${RENDER_WIDTH}   warm_start=${CHECKPOINT:-<none>}"
 echo "  group=$WANDB_GROUP"
 echo "================================================================"
 
@@ -175,7 +187,8 @@ python train_squint.py \
     --drop_penalty_coef="$DROP_PENALTY_COEF" \
     $PICK_ONLY_FLAG \
     $SIDE_APPROACH_FLAG \
-    $SHADOWS_FLAG
+    $SHADOWS_FLAG \
+    $CHECKPOINT_FLAG
 
 echo ""
 echo "Done. Checkpoint at runs/$EXP_NAME/ckpt.pt"
