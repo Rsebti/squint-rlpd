@@ -1,6 +1,6 @@
 # Handoff — RLPD on Squint for SO-101 grasp
 
-> **Pour la nouvelle session Claude Code sur la machine Linux (RTX 5090).**
+> **Pour la nouvelle session Claude Code sur la machine Linux (RTX 5070).**
 > Ce fichier est un dump de contexte pour que tu démarres froid sans rien
 > demander à l'utilisateur. Lis-le en entier avant d'agir.
 
@@ -90,7 +90,7 @@ Tout dans le répertoire `squint/`. Ordre strict :
 conda env create -f environment.yaml   # crée l'env "squint" avec torch cu128, maniskill, lerobot
 conda activate squint
 ```
-⚠️ Si Blackwell (RTX 5070/5090, sm_120) → torch 2.7.1+cu128 doit marcher. En cas de wheel mismatch, fallback nightly cu128.
+⚠️ La 5070 est Blackwell sm_120 → torch 2.7.1+cu128 doit marcher. En cas de wheel mismatch, fallback nightly cu128.
 
 ### Étape B — Validation code (30 sec)
 ```bash
@@ -117,7 +117,7 @@ python rlpd_utils.py from_lerobot \
 
 **Mentionne EXPLICITEMENT ces stats à l'utilisateur après la première exécution** — c'est lui qui sait ce qui est attendu vu qu'il a enregistré les démos.
 
-### Étape D — Baseline RLPD pure-online (validation algo, 15-30 min sur 5090)
+### Étape D — Baseline RLPD pure-online (validation algo, 15-30 min sur 5070)
 ```bash
 python train_rlpd.py --env_id=SO101LiftCube-v1 --pick_only_reward --num_envs=256 --track
 ```
