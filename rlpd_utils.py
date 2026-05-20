@@ -78,7 +78,15 @@ def load_offline_transitions(
     if reward_mode not in ("sparse", "recompute"):
         raise ValueError(f"reward_mode must be 'sparse' or 'recompute', got {reward_mode!r}")
 
-    if os.path.isfile(path):
+    zero_bowl_xyz = (lerobot_kwargs or {}).pop("zero_bowl_xyz", False) \
+        if isinstance(lerobot_kwargs, dict) else False
+    if os.path.isfile(path) and path.endswith(".h5"):
+        # Tommaso's v2 HDF5 demo bundle (scripted FK/IK collector).
+        td = _load_h5_v2(
+            path, obs_shape=obs_shape, state_dim=state_dim,
+            action_dim=action_dim, zero_bowl_xyz=zero_bowl_xyz,
+        )
+    elif os.path.isfile(path):
         td = _load_pt_bundle(path)
     else:
         # Treat as an HF dataset id.
@@ -139,6 +147,195 @@ def _load_pt_bundle(path: str) -> TensorDict:
             "Use rlpd_utils.save_offline_bundle to write bundles in the expected layout."
         )
     return obj
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HDF5 v2 loader (Tommaso's collector — scripts/collect_rlpd_demos.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# QPOS_START matches the collector's home pose. Used to compute the very first
+# delta (action[0] - QPOS_START) since the absolute trajectory starts FROM home.
+_QPOS_START_FOR_DELTA = np.array(
+    [
+        0.0,
+        -80.791 * np.pi / 180,
+        36.747 * np.pi / 180,
+        86.901 * np.pi / 180,
+        -82.154 * np.pi / 180,
+        120 * np.pi / 180,  # gripper fully open
+    ],
+    dtype=np.float32,
+)
+
+# Per-joint delta bound from the env's pd_joint_target_delta_pos controller
+# (envs/robot/so101.py). Used to clip+normalize absolute → delta into [-1, 1]^6.
+_DELTA_BOUND = np.array([0.05, 0.05, 0.05, 0.05, 0.05, 0.20], dtype=np.float32)
+
+
+def _load_h5_v2(
+    path: str,
+    obs_shape: Tuple[int, int, int],
+    state_dim: int,
+    action_dim: int,
+    zero_bowl_xyz: bool = False,
+) -> TensorDict:
+    """Load a v2 HDF5 demo bundle (Tommaso's scripted-FK/IK collector).
+
+    Schema reference: docs/RLPD_DEMO_PIPELINE.md.
+
+    Each demo_NNN group stores ``T`` consecutive frames as:
+      obs/rgb     : (T, H, W, 3) uint8
+      obs/state   : (T, state_dim) float32   layout: bowl_xyz(3) + target_qpos(6)
+                                              + goal_color_onehot(6) + noisy_qpos(6)
+      actions     : (T, 6) float32           **ABSOLUTE** joint targets in rad
+      rewards     : (T,) float32
+      terminals   : (T,) bool
+
+    We pair consecutive frames into ``T-1`` (obs_t, obs_{t+1}, action_t,
+    reward_t, done_t) transitions. The last transition of each demo is
+    flagged done=True regardless of the stored terminals — the trajectory
+    ends there because the next-obs would belong to a different demo.
+
+    Action-space conversion (per the schema's collector_deviation_control_mode):
+
+        delta[0] = act_abs[0] - QPOS_START
+        delta[t] = act_abs[t] - act_abs[t-1]      for t >= 1
+        delta = clip(delta, -DELTA_BOUND, DELTA_BOUND)
+        norm  = delta / DELTA_BOUND               ∈ [-1, 1]^6
+
+    Args:
+        path: HDF5 file path (ends in .h5).
+        obs_shape: (H, W, C) expected by the env's rgb obs. Validates the
+            stored frames downsample target matches.
+        state_dim: state-vector dim expected by the env (e.g. 21 for our
+            place env in default mode).
+        action_dim: action-vector dim (6 for SO-101 arm + gripper).
+        zero_bowl_xyz: if True, zero out the first 3 dims of the state in
+            BOTH obs and next_obs. Use this when training with
+            --skip-bowl=True (env omits the bowl, so its bowl_xyz_robot_frame
+            slot is zero-padded online; the demo state must match).
+
+    Returns a flat TensorDict with batch_size=[N] and keys
+    observations.{rgb, state}, next_observations.{rgb, state}, actions,
+    rewards, dones.
+    """
+    try:
+        import h5py
+    except ImportError as e:
+        raise ImportError(
+            "h5py is required to load v2 HDF5 demo bundles. "
+            "pip install h5py."
+        ) from e
+
+    H, W, C = obs_shape
+
+    obs_rgbs, next_rgbs = [], []
+    states, next_states = [], []
+    actions_list, rewards_list, dones_list = [], [], []
+
+    with h5py.File(path, "r") as f:
+        attrs_state_dim = int(f.attrs.get("state_dim", state_dim))
+        attrs_rgb_h = int(f.attrs.get("rgb_h", H))
+        attrs_rgb_w = int(f.attrs.get("rgb_w", W))
+        attrs_control_mode = str(f.attrs.get("control_mode", "pd_joint_pos"))
+
+        # Sanity: shape must match the env (or we can slice the state below).
+        if (attrs_rgb_h, attrs_rgb_w) != (H, W):
+            raise ValueError(
+                f"v2 demo bundle RGB shape ({attrs_rgb_h}, {attrs_rgb_w}) "
+                f"does not match env obs_shape ({H}, {W}). Re-collect with "
+                f"matching IMG_H/IMG_W or downsample at load time."
+            )
+
+        demo_keys = sorted(k for k in f.keys() if k.startswith("demo_"))
+        if not demo_keys:
+            raise ValueError(f"No demo_NNN groups found in {path}")
+
+        for name in demo_keys:
+            g = f[name]
+            rgb = np.asarray(g["obs/rgb"], dtype=np.uint8)        # (T, H, W, 3)
+            state = np.asarray(g["obs/state"], dtype=np.float32)  # (T, state_dim_attrs)
+            act_abs = np.asarray(g["actions"], dtype=np.float32)  # (T, 6)
+            rew = np.asarray(g["rewards"], dtype=np.float32)      # (T,)
+
+            T = act_abs.shape[0]
+            if T < 2:
+                continue
+
+            # Absolute → delta → normalized to [-1, 1]^6.
+            if attrs_control_mode == "pd_joint_pos":
+                prev = np.empty_like(act_abs)
+                prev[0] = _QPOS_START_FOR_DELTA
+                prev[1:] = act_abs[:-1]
+                deltas = act_abs - prev
+                deltas = np.clip(deltas, -_DELTA_BOUND, _DELTA_BOUND)
+                norm_actions = deltas / _DELTA_BOUND
+            else:
+                # Already in delta-pos convention (clip+normalize defensively).
+                norm_actions = np.clip(act_abs, -_DELTA_BOUND, _DELTA_BOUND) / _DELTA_BOUND
+
+            # Pair (obs_t, obs_{t+1}, action_t, reward_t, done_t) for t in [0, T-2].
+            o_rgb = rgb[:-1]
+            n_rgb = rgb[1:]
+            o_st = state[:-1]
+            n_st = state[1:]
+            a = norm_actions[:-1]
+            r = rew[:-1]
+            d = np.zeros(T - 1, dtype=bool)
+            d[-1] = True  # last transition of each demo terminates
+
+            if zero_bowl_xyz:
+                # Mask the first 3 dims (bowl_xyz_robot_frame slot) to match
+                # the env's --skip-bowl zero-padded state.
+                o_st = o_st.copy()
+                n_st = n_st.copy()
+                o_st[:, :3] = 0.0
+                n_st[:, :3] = 0.0
+
+            # Slice state if attrs dim > requested env dim (mirrors the
+            # generic slicing in load_offline_transitions for 58D→21D demos).
+            if o_st.shape[-1] > state_dim:
+                o_st = o_st[:, :state_dim]
+                n_st = n_st[:, :state_dim]
+
+            obs_rgbs.append(o_rgb)
+            next_rgbs.append(n_rgb)
+            states.append(o_st)
+            next_states.append(n_st)
+            actions_list.append(a)
+            rewards_list.append(r)
+            dones_list.append(d)
+
+    obs_rgbs = np.concatenate(obs_rgbs, axis=0)
+    next_rgbs = np.concatenate(next_rgbs, axis=0)
+    states_arr = np.concatenate(states, axis=0)
+    next_states_arr = np.concatenate(next_states, axis=0)
+    actions_arr = np.concatenate(actions_list, axis=0)
+    rewards_arr = np.concatenate(rewards_list, axis=0)
+    dones_arr = np.concatenate(dones_list, axis=0)
+
+    N = obs_rgbs.shape[0]
+    td = TensorDict(
+        observations=TensorDict(
+            rgb=torch.from_numpy(obs_rgbs).contiguous(),
+            state=torch.from_numpy(states_arr).contiguous(),
+            batch_size=[N],
+        ),
+        next_observations=TensorDict(
+            rgb=torch.from_numpy(next_rgbs).contiguous(),
+            state=torch.from_numpy(next_states_arr).contiguous(),
+            batch_size=[N],
+        ),
+        actions=torch.from_numpy(actions_arr).contiguous(),
+        rewards=torch.from_numpy(rewards_arr).contiguous(),
+        dones=torch.from_numpy(dones_arr).contiguous(),
+        batch_size=[N],
+    )
+    print(
+        f"Loaded {len(demo_keys)} v2 demos ({N} transitions) from {path} "
+        f"[control_mode={attrs_control_mode}, zero_bowl_xyz={zero_bowl_xyz}]"
+    )
+    return td
 
 
 # ─────────────────────────────────────────────────────────────────────────────
