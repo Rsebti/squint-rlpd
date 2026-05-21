@@ -100,9 +100,10 @@ class RandomizationConfig:
     # couple of point lights (local highlights). Every level is re-sampled per
     # episode, then all are scaled by one global exposure multiplier. The lights
     # are always WHITE — only their intensity is randomized, never their hue.
-    room_brightness_range: Sequence[float] = (0.0, 0.70)
-    """Per-episode ambient fill — savage range: 0 = pitch-black ambient
-    (only directionals visible), 0.70 = near-flood. Mid = 0.35."""
+    room_brightness_range: Sequence[float] = (0.0, 0.12)
+    """Per-episode ambient fill — 0 = pitch-black ambient (only directionals
+    visible), 0.12 = dim fill. Ambient is uniform so it is the #1 shadow-killer;
+    ceiling driven low (0.70->0.35->0.12) to MAXIMIZE cast-shadow contrast."""
     exposure_range: Sequence[float] = (0.25, 2.2)
     """Per-episode global exposure multiplier — savage 9× span. Low end
     gives a genuinely dim scene; high end blows highlights toward saturation."""
@@ -110,16 +111,36 @@ class RandomizationConfig:
     """Directional lights per sub-scene. Light 0 is the brightest 'key'; the
     other 2 are 'fill' from independent random directions. Capped at 3 —
     each shadow-casting light adds a per-env shadow map (GPU memory)."""
-    directional_key_intensity_range: Sequence[float] = (0.20, 1.80)
-    """Key directional light intensity (before exposure). Savage range —
-    low end ≈ no shadow, high end = harsh sun-style cast shadow."""
-    directional_fill_intensity_range: Sequence[float] = (0.0, 0.50)
+    directional_key_intensity_range: Sequence[float] = (1.80, 3.50)
+    """Key directional light intensity (before exposure) — the ONLY shadow
+    caster. FLOOR raised 0.20->1.80 so every episode has a strong sun-style
+    cast shadow (the old low floor left most episodes near-shadowless = "too
+    low most of the time"); ceiling 3.50 for harsh near-black shadows."""
+    directional_fill_intensity_range: Sequence[float] = (0.0, 0.10)
     """Fill directional light intensity (before exposure). Zero → sharp
-    one-sided shadow; up to 0.50 → multi-direction softer shadow."""
+    one-sided shadow; up to 0.10 → mild multi-direction softening. Fills do
+    NOT cast shadows, so they wash out the key's shadow — ceiling cut to 0.10
+    to maximize contrast."""
+    single_light_probability: float = 0.55
+    """Per-episode probability of the SINGLE-LIGHT regime: only the key
+    directional light is lit (all fill + point lights forced to 0), giving one
+    hard sun-style source from a random direction and the strongest possible
+    cast shadows. With prob (1 - this) the normal multi-light regime runs (key +
+    fills + points) for softer, multi-source shading. Set 0.0 to always use
+    multiple lights, 1.0 to always use a single light."""
+    top_light_probability: float = 0.40
+    """Per-episode probability that the KEY light comes from near-overhead
+    instead of a random (mostly sidewise) direction. When chosen, the key's
+    horizontal component is squashed and it points steeply down, so objects cast
+    short shadows directly beneath them (top-down studio look). Otherwise the key
+    direction is the usual oblique/sidewise sample. Most visible in the
+    single-light regime."""
     num_point_lights: int = 2
     """Point lights per sub-scene, at random positions above the workspace."""
-    point_light_intensity_range: Sequence[float] = (0.0, 0.60)
-    """Per-episode per-point-light intensity (before exposure)."""
+    point_light_intensity_range: Sequence[float] = (0.0, 0.12)
+    """Per-episode per-point-light intensity (before exposure). Points never
+    cast shadows, so they fill shadowed regions — ceiling cut 0.60→0.30→0.12
+    to stop them washing out the key's cast shadow."""
     light_color_jitter: Sequence[float] = (0.70, 1.30)
     """Per-channel (R, G, B) multiplier sampled INDEPENDENTLY per light per
     episode. Default (0.70, 1.30) = ±30% per channel = real off-white
@@ -292,7 +313,14 @@ class BaseRandomEnv(BaseEnv):
                 else:
                     direction = np.array([1.0, 1.0, -1.0]) if j == 0 else np.array([0.0, 0.0, -1.0])
                 dir_lights.append(self._add_directional_light(
-                    sub_scene, direction, [0.5, 0.5, 0.5], shadow=cfg.shadows,
+                    sub_scene, direction, [0.5, 0.5, 0.5],
+                    # Only the KEY light (j==0) casts shadows. SAPIEN caps the
+                    # number of shadow-casting directional lights, and 3 casters
+                    # exceed it ("too many directional lights that cast
+                    # shadows"). One randomized-direction key shadow is plenty
+                    # for sim2real shadow robustness; the fills just soften it,
+                    # and a single shadow map per env keeps the memory modest.
+                    shadow=(cfg.shadows and j == 0),
                 ))
 
             for j in range(cfg.num_point_lights if randomize else 0):
@@ -367,8 +395,19 @@ class BaseRandomEnv(BaseEnv):
             # One global per-episode exposure multiplier scaling every light.
             exposure = rng.uniform(*cfg.exposure_range)
 
-            # Ambient fill = the global, uniform room brightness (white).
+            # Single-light regime: with single_light_probability, light the
+            # scene with ONLY the key directional light (fills + points off) for
+            # one hard source and maximal cast shadows. Otherwise multi-light.
+            single_light = rng.uniform() < cfg.single_light_probability
+            # Top-down key: with top_light_probability the key comes from near
+            # overhead (short shadows straight under objects) instead of oblique.
+            top_light = rng.uniform() < cfg.top_light_probability
+
+            # Ambient fill = the global, uniform room brightness (white). Halved
+            # in the single-light regime so the lone key's shadow stays deep.
             amb = float(np.clip(rng.uniform(*cfg.room_brightness_range) * exposure, 0.0, 1.0))
+            if single_light:
+                amb *= 0.5
             sub_scene.render_system.ambient_light = [amb, amb, amb]
 
             jl, jh = cfg.light_color_jitter
@@ -380,16 +419,25 @@ class BaseRandomEnv(BaseEnv):
                 lo, hi = (cfg.directional_key_intensity_range if k == 0
                           else cfg.directional_fill_intensity_range)
                 g = float(max(rng.uniform(lo, hi) * exposure, 0.0))
+                if single_light and k != 0:
+                    g = 0.0  # fills off -> only the key light remains
                 tint = rng.uniform(jl, jh, size=(3,))
                 light.set_color([float(g * tint[0]), float(g * tint[1]), float(g * tint[2])])
                 direction = rng.uniform(-1.0, 1.0, size=(3,))
-                direction[2] = -abs(direction[2]) - 0.2
+                if k == 0 and top_light:
+                    # Near-overhead: squash horizontal, drive straight down.
+                    direction[:2] *= 0.18
+                    direction[2] = -abs(direction[2]) - 1.6
+                else:
+                    direction[2] = -abs(direction[2]) - 0.2
                 light.set_pose(sapien.Pose(
                     [0, 0, 0], sapien.math.shortest_rotation([1, 0, 0], direction.tolist())))
 
             # Point lights: re-sample intensity, position, and per-channel tint.
             for light in self._point_lights[i]:
                 g = float(max(rng.uniform(*cfg.point_light_intensity_range) * exposure, 0.0))
+                if single_light:
+                    g = 0.0  # points off in the single-light regime
                 tint = rng.uniform(jl, jh, size=(3,))
                 light.set_color([float(g * tint[0]), float(g * tint[1]), float(g * tint[2])])
                 pos = rng.uniform([-0.2, -0.4, 0.25], [0.6, 0.4, 0.75])
@@ -468,6 +516,17 @@ class BaseRandomEnv(BaseEnv):
                         else:
                             color = list(self.domain_randomization_config.robot_color)
                         part.material.set_base_color(color + [1])
+                        # 3D-printed black PLA finish: matte-satin with a faint
+                        # sheen and visible micro-texture. PLA prints are not
+                        # glossy (layer lines diffuse the highlight) but not dead
+                        # matte either — roughness high-ish, weak dielectric
+                        # specular, non-metallic.
+                        try:
+                            part.material.set_roughness(0.62)
+                            part.material.set_metallic(0.0)
+                            part.material.set_specular(0.22)
+                        except AttributeError:
+                            pass
 
     def _randomize_gripper_speed(self, env_idx: torch.Tensor):
         """Randomize gripper stiffness/damping per episode."""
@@ -1169,12 +1228,11 @@ class WristCameraEnv(BaseRandomEnv):
     """
 
     # Base pose relative to gripper_link.
-    # NOTE: these translations are visual-calibration tweaks originally tuned
-    # at FOV=82° (vertical). The 2026-05-19 OpenCV calibration of the real
-    # camera sets the canonical fovy=76.92° + 16:9 aspect. Originals:
-    # (-0.0049, 0.0498, -0.0591).
-    #   x: -0.0049 -> -0.0006 (+4.3 mm) — gripper sits at the LEFT of the image
-    #   z: -0.0591 -> -0.0641 (-5 mm) — small forward push along optical axis
+    # Visual-tuned mount (kept as the active calibration — overlays of the sim
+    # gripper on real frames preferred this over the 2026-05-20 hand-eye tune).
+    #   Hand-eye values (do not use unless re-validated):
+    #     WRIST_CAMERA_BASE_POS = (0.0034, 0.0612, -0.0474)
+    #     WRIST_CAMERA_BASE_ROT_RAD = (-1.466509, 1.628470, -0.512856)
     WRIST_CAMERA_BASE_POS = (-0.0006, 0.0498, -0.0641)
     WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-90), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
     # Vertical FOV (SAPIEN fovy) from 2026-05-19 OpenCV calibration:

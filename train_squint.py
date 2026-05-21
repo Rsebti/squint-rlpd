@@ -758,12 +758,17 @@ if __name__ == "__main__":
         eval_env_kwargs["n_distractors"] = args.n_distractors
         env_kwargs["use_real_bowl"] = args.use_real_bowl
         eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
-        env_kwargs["skip_bowl"] = args.skip_bowl
-        eval_env_kwargs["skip_bowl"] = args.skip_bowl
+        # skip_bowl / squint_native_reward are custom flags NOT in fede
+        # master's place.py (envs/ synced from fede master). Pass only when
+        # True so a standard run doesn't hit an unexpected-kwarg TypeError.
+        if args.skip_bowl:
+            env_kwargs["skip_bowl"] = args.skip_bowl
+            eval_env_kwargs["skip_bowl"] = args.skip_bowl
         env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
         eval_env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
-        env_kwargs["squint_native_reward"] = args.squint_native_reward
-        eval_env_kwargs["squint_native_reward"] = args.squint_native_reward
+        if args.squint_native_reward:
+            env_kwargs["squint_native_reward"] = args.squint_native_reward
+            eval_env_kwargs["squint_native_reward"] = args.squint_native_reward
         env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         env_kwargs["pick_only_reward"] = args.pick_only_reward

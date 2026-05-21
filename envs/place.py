@@ -100,17 +100,25 @@ class FlatTableSceneBuilder(TableSceneBuilder):
     TABLE_CENTER_Z = 0.9196429 / 2
     INIT_POS = [-0.12, 0, -0.9196429]
 
-    def __init__(self, env, frictions=None):
+    def __init__(self, env, frictions=None, roughness=None, specular=None):
         super().__init__(env)
         # Per-env static/dynamic friction values. None = use SAPIEN default.
         self.frictions = frictions
+        # Per-env render-material DR for the semi-gloss plastic lab bench.
+        self.roughness = roughness
+        self.specular = specular
 
-    def _make_render_material(self):
+    def _make_render_material(self, roughness=0.30, specular=0.65):
+        # Semi-gloss plastic laminate (typical light-grey scientific lab bench):
+        # slightly rough so the highlight is soft/spread, but reflective enough
+        # that the key light produces a CLEARLY visible specular hotspot that
+        # tracks the randomized light direction. Dielectric (metallic=0), strong
+        # specular for the clear-coat sheen plastic surfaces have.
         return sapien.render.RenderMaterial(
             base_color=[*SCENE_NEUTRAL_RGB, 1.0],
-            roughness=0.85,
-            metallic=0.0,
-            specular=0.1,
+            roughness=roughness,
+            metallic=0.0,     # plastic dielectric, not metal
+            specular=specular,
         )
 
     def build(self):
@@ -145,10 +153,12 @@ class FlatTableSceneBuilder(TableSceneBuilder):
                     half_size=self.TABLE_HALF,
                     material=phys_mat,
                 )
+                rough_i = (float(self.roughness[i]) if self.roughness is not None else 0.30)
+                spec_i = (float(self.specular[i]) if self.specular is not None else 0.65)
                 builder.add_box_visual(
                     pose=sapien.Pose(p=[0, 0, self.TABLE_CENTER_Z]),
                     half_size=self.TABLE_HALF,
-                    material=self._make_render_material(),
+                    material=self._make_render_material(roughness=rough_i, specular=spec_i),
                 )
                 builder.initial_pose = sapien.Pose(
                     p=self.INIT_POS, q=euler2quat(0, 0, np.pi / 2)
@@ -198,6 +208,16 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     # Friction for the table top. Fixed at 0.5 (no randomization) so contacts
     # average a clean 0.5 against cubes and the bowl.
     table_friction_range: Sequence[float] = (0.3, 0.5)
+    # Per-env render-material DR for the plastic lab-bench top. Glossy enough
+    # that a specular hotspot is clearly visible across most light directions
+    # (roughness low), with a strong dielectric sheen (specular high). Spans
+    # satin -> semi-gloss so the policy sees a range of plastic finishes.
+    table_roughness_range: Sequence[float] = (0.25, 0.48)
+    """Per-env table roughness. Low = sharp/visible hotspot, high = softer/spread.
+    Nudged up from (0.18,0.40) to slightly reduce reflectiveness."""
+    table_specular_range: Sequence[float] = (0.40, 0.65)
+    """Per-env table specular reflection strength (plastic clear-coat sheen).
+    Nudged down from (0.50,0.80) to slightly reduce reflectiveness."""
     randomize_item_color: bool = False
 
     # Per-episode DR on the cube materials (goal + distractors). HSV-based so
@@ -207,12 +227,15 @@ class PlaceRandomizationConfig(DefaultRandomizationConfig):
     """Half-range of per-episode multiplicative jitter on cube HSV saturation. ±5% (tightened from ±10% — bigger jitters knock S down to ~0.65 on bad rolls, which is the threshold where the cube starts looking pastel/white-mixed)."""
     item_value_jitter: float = 0.10
     """Half-range of per-episode multiplicative jitter on cube HSV value (brightness). ±10% by default."""
-    item_roughness_range: Sequence[float] = (0.7, 0.95)  # matte (painted-wood look)
-    """Per-episode cube material roughness (matte <-> slightly glossy)."""
-    item_metallic_range: Sequence[float] = (0.0, 0.15)
-    """Per-episode cube material metallic (kept low — painted wood is non-metallic)."""
-    item_specular_range: Sequence[float] = (0.0, 0.1)  # was (0.1, 0.4) — specular is the dominant "looks white" source: it's a white reflection layer on top of the diffuse base, and with the matte roughness it spreads across the cube face washing the colour out. Capped near zero now.
-    """Per-episode cube material specular reflection strength."""
+    item_roughness_range: Sequence[float] = (0.30, 0.50)  # smooth varnished toy-wood block (NOT rough)
+    """Per-episode cube material roughness. Lowered from (0.7,0.95) matte to a
+    smooth, sanded/varnished toy-wood-block finish — clearly not a rough surface."""
+    item_metallic_range: Sequence[float] = (0.0, 0.05)
+    """Per-episode cube material metallic (kept ~0 — wood is non-metallic)."""
+    item_specular_range: Sequence[float] = (0.12, 0.25)  # subtle varnish sheen
+    """Per-episode cube material specular. A subtle clear-varnish sheen typical
+    of toy wooden blocks — kept modest so the goal color stays readable
+    (specular is a white reflection layer that washes out the base color)."""
 
     # Per-episode DR on the bowl material. Bowl uses baked vertex colors;
     # we apply a per-episode HSV-shifted tint via base_color (PBR multiplies
@@ -252,7 +275,6 @@ class Place(DefaultCameraEnv):
         item_type="cube",
         n_distractors: int = 1,
         use_real_bowl: bool = True,
-        skip_bowl: bool = False,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
         domain_randomization_config: Union[
@@ -275,7 +297,6 @@ class Place(DefaultCameraEnv):
         pick_stable_duration_s: float = 1.0,
         pick_side_approach: bool = False,
         pick_side_approach_open_coef: float = 0.3,
-        squint_native_reward: bool = False,
         drop_penalty_coef: float = 0.0,
         split_only_reward: bool = False,
         split_target_gap: float = 0.03,
@@ -291,6 +312,9 @@ class Place(DefaultCameraEnv):
         split_color_hierarchy: bool = False,
         split_far_penalty_coef: float = 0.0,
         split_far_penalty_dist: float = 0.15,
+        split_closest_first: bool = False,
+        split_low_hover_coef: float = 0.0,
+        split_low_hover_z: float = 0.01,
         **kwargs,
     ):
         # CAPS-style action-rate penalty: -coef * ||a_t - a_{t-1}||^2 added to
@@ -333,21 +357,6 @@ class Place(DefaultCameraEnv):
         # Per-env state for the drop-penalty: previous step's is_item_grasped.
         # Lazy init on first reward call; reset to False on _initialize_episode.
         self._prev_is_grasped = None
-        # Squint-native-style reward (pick-only): squint native Lift reward
-        # shape (reach + is_grasped + stable_floor) + sim2real open-gripper
-        # bonus (gated on pick_side_approach + not_grasped). Purely additive,
-        # exploit-free, with phase jumps large enough to dominate hover. Only
-        # consulted when pick_only_reward=True.
-        self.squint_native_reward = bool(squint_native_reward)
-        if self.squint_native_reward:
-            assert pick_only_reward, (
-                "squint_native_reward=True requires pick_only_reward=True "
-                "(the success criterion and auto-terminate come from the "
-                "pick_only branch)."
-            )
-            assert not split_only_reward, (
-                "squint_native_reward is incompatible with split_only_reward."
-            )
         # Per-env consecutive-stable counter (pick-only mode). Init on _load_scene.
         self._grasp_slow_counter = None
         # Split-only reward mode: train the policy to push the two cubes apart
@@ -379,6 +388,13 @@ class Place(DefaultCameraEnv):
         # success (no cube may be flung). 0 = disabled.
         self.split_far_penalty_coef = float(split_far_penalty_coef)
         self.split_far_penalty_dist = float(split_far_penalty_dist)
+        # Closest-pair-first separation curriculum (alternative to color
+        # hierarchy): reach the tightest pair and push it apart first, then the
+        # next-closest, etc. Plus a low-gripper shaping term that drives the EE
+        # z toward split_low_hover_z above the table (cube-pushing height).
+        self.split_closest_first = bool(split_closest_first)
+        self.split_low_hover_coef = float(split_low_hover_coef)
+        self.split_low_hover_z = float(split_low_hover_z)
         # Per-env consecutive-stable counter (split mode). Lazy init in evaluate.
         self._split_slow_counter = None
         # Per-env sticky "all cubes separated this episode" flag (split mode).
@@ -406,19 +422,6 @@ class Place(DefaultCameraEnv):
         self.item_type = item_type
         self.n_distractors = n_distractors
         self.use_real_bowl = use_real_bowl
-        # skip_bowl: skip bowl actor entirely. Used to match offline demos
-        # recorded without a bowl. Only valid with pick_only_reward (other
-        # reward modes dereference self.bin.pose.p). Assertion below.
-        self.skip_bowl = bool(skip_bowl)
-        if self.skip_bowl:
-            assert pick_only_reward, (
-                "skip_bowl=True is only supported with pick_only_reward=True "
-                "(other reward modes reference bin.pose.p which is None when "
-                "skip_bowl=True). Either enable pick_only_reward or disable skip_bowl."
-            )
-            assert not split_only_reward, (
-                "skip_bowl=True is incompatible with split_only_reward."
-            )
 
         if self.split_only_reward:
             if self.pick_only_reward:
@@ -533,7 +536,21 @@ class Place(DefaultCameraEnv):
                 cfg.table_friction_range[0] + cfg.table_friction_range[1]
             ) / 2
         self.table_frictions = common.to_tensor(table_frictions, device=self.device)
-        self.table_scene = FlatTableSceneBuilder(self, frictions=table_frictions)
+
+        # Per-env plastic-bench render material (roughness + specular). When DR
+        # is off, use the midpoint so eval still shows the glossy lab-table look.
+        if self.domain_randomization:
+            table_roughness = self._batched_episode_rng.uniform(
+                low=cfg.table_roughness_range[0], high=cfg.table_roughness_range[1])
+            table_specular = self._batched_episode_rng.uniform(
+                low=cfg.table_specular_range[0], high=cfg.table_specular_range[1])
+        else:
+            table_roughness = np.ones(self.num_envs) * np.mean(cfg.table_roughness_range)
+            table_specular = np.ones(self.num_envs) * np.mean(cfg.table_specular_range)
+
+        self.table_scene = FlatTableSceneBuilder(
+            self, frictions=table_frictions,
+            roughness=table_roughness, specular=table_specular)
         self.table_scene.build()
         # Repaint the table, ground, and any other table-scene actors to a
         # neutral grey. The cubes, bin, robot, and goal_site are built
@@ -701,8 +718,11 @@ class Place(DefaultCameraEnv):
 
         if self.use_real_bowl:
             import os
+            # Procedural white-carton bowl (truncated-cone shell): bottom Ø10 cm,
+            # rim Ø15 cm, height 4.5 cm, 1 mm wall. Regenerate via
+            # scripts/gen_carton_bowl.py.
             mesh_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "meshes", "bowl.obj"
+                os.path.dirname(os.path.abspath(__file__)), "meshes", "bowl_carton.obj"
             )
             # Read mesh AABB to set bin_half_sizes (used by success check).
             try:
@@ -777,12 +797,6 @@ class Place(DefaultCameraEnv):
 
         bins = []
         for i in range(self.num_envs):
-            # skip_bowl mode: exit before creating any bin actor. bins stays
-            # empty; self.bin is set to None below. Done as a break instead
-            # of wrapping the for loop in an if/else so the original body
-            # (and its indentation) stays untouched.
-            if self.skip_bowl:
-                break
             builder = self.scene.create_actor_builder()
             if self.use_real_bowl:
                 # Dynamic actor with CoACD-decomposed collision and the real
@@ -798,7 +812,11 @@ class Place(DefaultCameraEnv):
                     material=bowl_material,
                     density=500.0,
                     decomposition="coacd",
-                    decomposition_params=dict(threshold=0.3, max_convex_hull=8),
+                    # Thin (1 mm) shell: low concavity threshold + more hulls so
+                    # CoACD wraps the walls and KEEPS the open cavity (a coarse
+                    # decomposition fills the bowl, blocking the cube). More hulls
+                    # = more GPU memory at high num_envs — drop if OOM at 2048.
+                    decomposition_params=dict(threshold=0.04, max_convex_hull=48),
                 )
                 # Visual from .ply alongside .obj. Bowl color is forced
                 # white by _randomize_bowl_tint (base_color + emission),
@@ -842,13 +860,8 @@ class Place(DefaultCameraEnv):
             bins.append(bin_actor)
             self.remove_from_state_dict_registry(bin_actor)
 
-        if self.skip_bowl:
-            # bins is empty (loop broke before any actor build). Sentinel
-            # value picked up by _initialize_episode / _get_obs* / evaluate.
-            self.bin = None
-        else:
-            self.bin = Actor.merge(bins, name="bin")
-            self.add_to_state_dict_registry(self.bin)
+        self.bin = Actor.merge(bins, name="bin")
+        self.add_to_state_dict_registry(self.bin)
 
         # Distractor cubes (cube tasks only, when n_distractors > 0): same
         # size/physics as the target. Each distractor gets a palette color sampled
@@ -1081,20 +1094,18 @@ class Place(DefaultCameraEnv):
                     part.material.set_specular(specular)
 
     def _randomize_bowl_tint(self, env_idx: torch.Tensor):
-        """Per-episode bowl tint. LOCKED to pure white — base_color is set to
-        white and a full-strength emission is applied so the bowl appears
-        bright white regardless of scene lighting. DR knobs ignored.
+        """Per-episode bowl material. White CARTON (cardboard): pure-white base,
+        fully matte (roughness 1.0, specular 0.0, metallic 0.0) and NO emission,
+        so the bowl is lit purely by the scene and takes cast shadows like real
+        cardboard. (Previously it was self-luminous white, which killed shading.)
 
         SAPIEN ignores PLY vertex colors, so the only color source is the
-        per-part material; setting base_color + emission here is sufficient."""
+        per-part material; setting base_color here is sufficient."""
         if self.bin is None:
             return
         env_idx_list = env_idx.tolist() if isinstance(env_idx, torch.Tensor) else list(env_idx)
         base = [1.0, 1.0, 1.0, 1.0]
-        # Emission strength: 0=lit only, 1=full self-luminous. ~0.5 keeps the
-        # bowl bright white but lets scene shading still modulate it.
-        e = 0.4
-        emission = [e, e, e, 1.0]
+        no_emission = [0.0, 0.0, 0.0, 1.0]
         for i in env_idx_list:
             obj = self.bin._objs[i]
             entity = getattr(obj, "entity", obj)
@@ -1104,7 +1115,14 @@ class Place(DefaultCameraEnv):
             for render_shape in comp.render_shapes:
                 for part in render_shape.parts:
                     part.material.set_base_color(base)
-                    part.material.set_emission(emission)
+                    part.material.set_emission(no_emission)
+                    # Carton = 0 reflectiveness: fully rough, no specular.
+                    try:
+                        part.material.set_roughness(1.0)
+                        part.material.set_metallic(0.0)
+                        part.material.set_specular(0.0)
+                    except AttributeError:
+                        pass
 
     def _sample_goal_and_distractor_colors(self, env_idx: torch.Tensor, options: dict):
         """Sample goal_color_idx (honoring options) and n_distractors distractor
@@ -1278,36 +1296,34 @@ class Place(DefaultCameraEnv):
             # Cube–bowl exclusion: cube center must be ≥ 10 cm from bowl
             # center (bowl rim is at 7.5 cm, +2.5 cm safety). Re-sample the
             # BOWL on conflict so the cube's LHS-spread structure is preserved.
-            # Skipped entirely in skip_bowl mode (no bowl to avoid).
-            if not self.skip_bowl:
-                BOWL_EXCLUSION = 0.10
-                for _ in range(20):
-                    delta_xy = item_xy_world - bin_xy_world
-                    dist = torch.linalg.norm(delta_xy, dim=-1)
-                    bad = dist < BOWL_EXCLUSION
-                    if not bad.any():
-                        break
-                    n_bad = int(bad.sum().item())
-                    bin_xy_offset[bad] = sample_half_disk(n_bad, stratified=False)
-                    bin_xy_world = arc_center_world + bin_xy_offset
-                # Hard fix for any holdouts: push the BOWL radially away from the
-                # cube to the exclusion boundary (rare). The push direction is
-                # tangent-only when the conflict is exactly axial; otherwise away
-                # from the cube. May leave the bowl slightly outside the disk in
-                # degenerate cases — acceptable for the rare fallback.
-                delta_xy = bin_xy_world - item_xy_world
-                dist = torch.linalg.norm(delta_xy, dim=-1, keepdim=True)
-                still_bad = (dist < BOWL_EXCLUSION).squeeze(-1)
-                if still_bad.any():
-                    direction = torch.where(
-                        dist > 1e-6, delta_xy / dist.clamp(min=1e-6),
-                        torch.tensor([1.0, 0.0], device=self.device).expand_as(delta_xy),
-                    )
-                    bin_xy_world = torch.where(
-                        still_bad.unsqueeze(-1),
-                        item_xy_world + direction * BOWL_EXCLUSION,
-                        bin_xy_world,
-                    )
+            BOWL_EXCLUSION = 0.10
+            for _ in range(20):
+                delta_xy = item_xy_world - bin_xy_world
+                dist = torch.linalg.norm(delta_xy, dim=-1)
+                bad = dist < BOWL_EXCLUSION
+                if not bad.any():
+                    break
+                n_bad = int(bad.sum().item())
+                bin_xy_offset[bad] = sample_half_disk(n_bad, stratified=False)
+                bin_xy_world = arc_center_world + bin_xy_offset
+            # Hard fix for any holdouts: push the BOWL radially away from the
+            # cube to the exclusion boundary (rare). The push direction is
+            # tangent-only when the conflict is exactly axial; otherwise away
+            # from the cube. May leave the bowl slightly outside the disk in
+            # degenerate cases — acceptable for the rare fallback.
+            delta_xy = bin_xy_world - item_xy_world
+            dist = torch.linalg.norm(delta_xy, dim=-1, keepdim=True)
+            still_bad = (dist < BOWL_EXCLUSION).squeeze(-1)
+            if still_bad.any():
+                direction = torch.where(
+                    dist > 1e-6, delta_xy / dist.clamp(min=1e-6),
+                    torch.tensor([1.0, 0.0], device=self.device).expand_as(delta_xy),
+                )
+                bin_xy_world = torch.where(
+                    still_bad.unsqueeze(-1),
+                    item_xy_world + direction * BOWL_EXCLUSION,
+                    bin_xy_world,
+                )
 
             # Cluster of (1 + n_distractors) cubes glued face-to-face. The
             # sampled position is the geometric center of the cluster, so the
@@ -1382,29 +1398,23 @@ class Place(DefaultCameraEnv):
                     for k, d_actor in enumerate(self.distractors):
                         self._set_actor_palette_color(d_actor, env_idx, distractor_idxs[:, k])
 
-            # Set bin pose. Skipped in skip_bowl mode (self.bin is None).
-            if self.bin is not None:
-                bin_xyz = torch.zeros((b, 3))
-                bin_xyz[:, :2] = bin_xy_world
-                bin_xyz[:, 2] = self.bin_thickness / 2
-                qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
-                self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
+            # Set bin pose
+            bin_xyz = torch.zeros((b, 3))
+            bin_xyz[:, :2] = bin_xy_world
+            bin_xyz[:, 2] = self.bin_thickness / 2
+            qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
+            self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
 
-                # Per-episode bowl color tint (hue ±10°, sat ±10%, value ±10%).
-                # PBR multiplies base_color × vertex_color, so this tints the
-                # baked .ply colors without flattening them.
-                if self.use_real_bowl:
-                    self._randomize_bowl_tint(env_idx)
+            # Per-episode bowl color tint (hue ±10°, sat ±10%, value ±10%).
+            # PBR multiplies base_color × vertex_color, so this tints the
+            # baked .ply colors without flattening them.
+            if self.use_real_bowl:
+                self._randomize_bowl_tint(env_idx)
 
-                # Goal is above bin center (above-rim for bowl, at-floor for parametric)
-                goal_xyz = bin_xyz.clone()
-                goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx] + self.target_z_above_floor
-                self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
-            else:
-                # skip_bowl: park goal_site at origin (unused — pick_only_reward
-                # ignores goal_site, and it's a kinematic hidden actor).
-                goal_xyz = torch.zeros((b, 3), device=self.device)
-                self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
+            # Goal is above bin center (above-rim for bowl, at-floor for parametric)
+            goal_xyz = bin_xyz.clone()
+            goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx] + self.target_z_above_floor
+            self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
@@ -1425,13 +1435,8 @@ class Place(DefaultCameraEnv):
         # Bowl centre in the robot base frame (xyz). Appended last so it lands
         # at the end of the flattened state vector. In real-deploy the real
         # robot has no `.pose`; fall back to a fixed measured bowl position.
-        # skip_bowl mode: zero-pad so the state-vector dim stays stable.
-        if getattr(self, "bin", None) is not None and hasattr(self.agent.robot, "pose"):
+        if hasattr(self.agent.robot, "pose") and hasattr(self, "bin"):
             obs["bowl_xyz_robot_frame"] = (self.agent.robot.pose.inv() * self.bin.pose).p
-        elif getattr(self, "skip_bowl", False):
-            obs["bowl_xyz_robot_frame"] = torch.zeros(
-                qpos.shape[0], 3, dtype=qpos.dtype, device=qpos.device
-            )
         else:
             bowl_xyz = torch.tensor([0.20, 0.10, 0.00], dtype=qpos.dtype, device=qpos.device)
             obs["bowl_xyz_robot_frame"] = bowl_xyz.unsqueeze(0).expand(qpos.shape[0], 3)
@@ -1440,28 +1445,15 @@ class Place(DefaultCameraEnv):
     def _get_obs_extra(self, info: dict):
         obs = dict()
         if self.obs_mode_struct.state:
-            # skip_bowl: zero-pad the bin-related slices so the state-vector dim
-            # stays stable across modes. RGB is the primary policy input; the
-            # privileged state slices are zero-padded in deploy and demo loads
-            # too (see RLPD.md table), so this matches.
-            if self.bin is not None:
-                bin_pose = self.bin.pose.raw_pose
-                tcp_to_bin_pos = self.bin.pose.p - self.agent.tcp_pos
-                item_to_bin_pos = self.bin.pose.p - self.item.pose.p
-            else:
-                B = self.item.pose.p.shape[0]
-                bin_pose = torch.zeros(B, 7, device=self.device)
-                tcp_to_bin_pos = torch.zeros(B, 3, device=self.device)
-                item_to_bin_pos = torch.zeros(B, 3, device=self.device)
             obs.update(
                 qvel=self.agent.robot.get_qvel(),
                 is_item_grasped=info["is_item_grasped"],
                 item_pose=self.item.pose.raw_pose,
-                bin_pose=bin_pose,
+                bin_pose=self.bin.pose.raw_pose,
                 tcp_pose=self.agent.tcp_pose.raw_pose,
                 tcp_to_item_grip_pos=self.item.pose.p - self.agent.tcp_pos,
-                tcp_to_bin_pos=tcp_to_bin_pos,
-                item_to_bin_pos=item_to_bin_pos,
+                tcp_to_bin_pos=self.bin.pose.p - self.agent.tcp_pos,
+                item_to_bin_pos=self.bin.pose.p - self.item.pose.p,
             )
             if self.domain_randomization:
                 gripper_params = self.get_gripper_params()
@@ -1478,26 +1470,16 @@ class Place(DefaultCameraEnv):
 
     def evaluate(self):
         item_pos = self.item.pose.p
-        # skip_bowl: cube can never be "above bin" since there's no bin. Force
-        # the boolean to False; bin_pos / offset / inside_* are skipped.
-        if self.bin is not None:
-            bin_pos = self.bin.pose.p.clone()
-            bin_pos[:, 2] = self.bin_thickness + self.item_half_sizes
+        bin_pos = self.bin.pose.p.clone()
+        bin_pos[:, 2] = self.bin_thickness + self.item_half_sizes
 
-            offset = item_pos - bin_pos
-            inside_x = torch.abs(offset[:, 0]) < self.bin_half_sizes_x
-            inside_y = torch.abs(offset[:, 1]) < self.bin_half_sizes_y
-            # Cube must also be at least 4 cm above the table (z = 0) so a cube
-            # flush on the table can't trigger above_bin / success.
-            is_cube_above_table = item_pos[:, 2] > 0.04
-            is_item_above_bin = inside_x & inside_y & is_cube_above_table
-        else:
-            is_item_above_bin = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
-            # inside_x / inside_y are returned in the info dict below; define
-            # zero placeholders so the dict build doesn't NameError in
-            # skip_bowl mode.
-            inside_x = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
-            inside_y = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
+        offset = item_pos - bin_pos
+        inside_x = torch.abs(offset[:, 0]) < self.bin_half_sizes_x
+        inside_y = torch.abs(offset[:, 1]) < self.bin_half_sizes_y
+        # Cube must also be at least 4 cm above the table (z = 0) so a cube
+        # flush on the table can't trigger above_bin / success.
+        is_cube_above_table = item_pos[:, 2] > 0.04
+        is_item_above_bin = inside_x & inside_y & is_cube_above_table
 
         item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
         is_item_static = item_vel <= 2e-2
@@ -1515,11 +1497,7 @@ class Place(DefaultCameraEnv):
         is_robot_static = self.agent.is_static()
 
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
-        # skip_bowl: no bin to touch; force the boolean to False.
-        if self.bin is not None:
-            robot_touching_bin = self.agent.is_touching(self.bin)
-        else:
-            robot_touching_bin = torch.zeros(item_pos.shape[0], dtype=torch.bool, device=self.device)
+        robot_touching_bin = self.agent.is_touching(self.bin)
         robot_touching_item = self.agent.is_touching(self.item)
 
         # ── Split mode: inter-cube separation over ALL pairs ────────────────
@@ -1532,6 +1510,8 @@ class Place(DefaultCameraEnv):
         split_stage_f = torch.zeros_like(item_vel)
         split_target_pos = item_pos
         split_target_min_gap = min_gap
+        split_num_separated = torch.zeros_like(item_vel)
+        split_closest_pair_mid = item_pos
         if self.split_only_reward:
             cube_pos = torch.stack(
                 [item_pos] + [d.pose.p for d in self.distractors], dim=1
@@ -1587,6 +1567,21 @@ class Place(DefaultCameraEnv):
                 advance = (split_target_min_gap >= self.split_target_gap) & (self._split_stage < C)
                 self._split_stage = self._split_stage + advance.long()
                 split_stage_f = self._split_stage.float()
+
+            # Closest-pair-first: count separated UNIQUE pairs (i<j) and locate
+            # the tightest pair's midpoint so the reward can target it first.
+            if self.split_closest_first:
+                pair_gap = pair_dist - 2.0 * self.item_half_sizes.view(-1, 1, 1)
+                triu = torch.triu(
+                    torch.ones(C, C, dtype=torch.bool, device=self.device), diagonal=1
+                )
+                split_num_separated = (
+                    (pair_gap >= self.split_target_gap) & triu[None]
+                ).sum(dim=(1, 2)).float()
+                amin_idx = pair_dist.masked_fill(eye, float("inf")).reshape(E, C * C).argmin(dim=1)
+                ci = torch.div(amin_idx, C, rounding_mode="floor")
+                cj = amin_idx % C
+                split_closest_pair_mid = 0.5 * (cube_pos[arange_E, ci] + cube_pos[arange_E, cj])
 
             # Sticky "all cubes have been separated this episode" flag — gates
             # the hover phase so the reward doesn't oscillate if a cube drifts.
@@ -1657,6 +1652,8 @@ class Place(DefaultCameraEnv):
             "split_stage": split_stage_f,
             "split_target_pos": split_target_pos,
             "split_target_min_gap": split_target_min_gap,
+            "split_num_separated": split_num_separated,
+            "split_closest_pair_mid": split_closest_pair_mid,
         }
 
     @property
@@ -1677,114 +1674,11 @@ class Place(DefaultCameraEnv):
                 self._cached_pick_max_steps = 100  # PlaceCube default
         return self._cached_pick_max_steps
 
-    def _compute_dense_reward_pick_only_squint_native(
-        self, obs: Any, action: torch.Tensor, info: dict
-    ):
-        """Squint-native-style reward for pick-only (no lift, no place).
-
-        Based on the Lift task reward in https://github.com/aalmuzairee/squint
-        (envs/lift.py::compute_dense_reward), adapted for grasp-only:
-
-          squint Lift native:
-            reward = reach(1-tanh(5d)) + is_grasped + exp(-2·rest_dist)·grasped
-                     - 3·table - 1·(~item_lifted)
-
-          our adaptation (grasp-only, no return-to-rest, no lift requirement):
-            reward = reach + is_grasped + (1-tanh(10·item_vel))·is_grasped
-                     + open_coef·gripper_open·(~grasped)   [if pick_side_approach]
-                     - 3·table
-            terminal on success: (1+1+1) × remaining_steps
-
-        Component-wise:
-          - reach (1 − tanh(5·d)): squint native, max 1.0. Steep gradient
-            from far away, flat near 0 — relies on the +1 grasp jump (not on
-            reach gradient) to escape proximity plateaus.
-          - is_grasped (+1): squint native Lift phase jump. The dominant
-            signal that breaks the hover trap. Q(grasped) − Q(hover) ≈ +1/(1-γ)
-            ≈ +10 per step at γ=0.9.
-          - stable_floor (1 − tanh(10·||vel_item||)) · is_grasped: replaces
-            squint Lift's exp(−2·rest_dist) since we DON'T return to home pose
-            (FK/IK handles the place phase). Same purpose: incentivise holding
-            the cube still after grasp. Gated on is_grasped so it doesn't
-            reward an empty stationary gripper.
-          - open_reward (sim2real addition, opt-in via pick_side_approach):
-            open_coef · gripper_open · (1 − is_grasped). Encourages keeping
-            the gripper open during approach. Gated on (~is_grasped) so it
-            disappears at grasp and doesn't compete with the grasp_floor.
-          - table penalty (−3): squint native Lift coefficient.
-          - terminal on success: per_step_peak (= 3) × remaining_steps.
-            Compensates for auto-termination on success — without this, a
-            hover_forever episode (return ≈ 100·1.3 = 130) would beat an
-            early-success episode (return ≈ T·1.3 + 9 ≈ 50). The
-            multiplicative terminal makes early success strongly preferred.
-
-        Exploit audit:
-          - Push cube with TCP: reach uses ||TCP − cube_COM||, identical to
-            static contact → no extra reward.
-          - Fake grasp: gated by ManiSkill's agent.is_grasping() which checks
-            two-finger force/alignment, not fakeable from a single-finger
-            push.
-          - Slow movement without grasp: stable_floor multiplied by
-            is_grasped → zero if not grasped.
-          - Hover with open gripper indefinitely: bounded by reach(1) +
-            open(0.3) = 1.3 per step. Q(hover) ≈ 13 ≪ Q(grasp) ≈ 30+terminal.
-          - Drop + re-grasp cycle (chasing bonus): no ~item_lifted penalty
-            here (unlike Lift native), so no incentive to artificially lift.
-            The stable_floor only rewards still grasping, not high z.
-        """
-        # ── Reach (squint native Lift) ──────────────────────────────
-        tcp_to_item_dist = torch.linalg.norm(
-            self.agent.tcp_pose.p - self.item.pose.p, axis=1
-        )
-        reach_reward = 1 - torch.tanh(5 * tcp_to_item_dist)
-
-        # ── Grasp phase jump (squint native Lift = +1) ──────────────
-        is_grasped = info["is_item_grasped"].float()
-        grasp_floor = is_grasped
-
-        # ── Stable phase jump (replaces native return-to-rest term) ─
-        item_vel = torch.linalg.norm(self.item.linear_velocity, axis=-1)
-        stable_floor = (1.0 - torch.tanh(10.0 * item_vel)) * is_grasped
-
-        # ── Sim2real open-gripper bonus (opt-in via pick_side_approach)
-        if self.pick_side_approach:
-            gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
-            gripper_open = torch.clamp(
-                (self.agent.robot.get_qpos()[:, -1] - gripper_min)
-                / (gripper_max - gripper_min),
-                0.0, 1.0,
-            )
-            open_reward = (
-                self.pick_side_approach_open_coef * gripper_open * (1.0 - is_grasped)
-            )
-        else:
-            open_reward = torch.zeros_like(reach_reward)
-
-        # ── Combine (purely additive, squint-native style) ──────────
-        reward = reach_reward + grasp_floor + stable_floor + open_reward
-
-        # ── Penalty (squint native: -3 × touching_table) ────────────
-        reward = reward - 3.0 * info["robot_touching_table"].float()
-
-        # ── Terminal bonus: peak × remaining on info["success"] ────
-        per_step_peak = 3.0  # reach(1) + grasp(1) + stable(1)
-        max_steps = self._pick_only_max_steps
-        remaining = (max_steps - self.elapsed_steps.float()).clamp(min=0)
-        reward = torch.where(
-            info["success"], per_step_peak * remaining, reward
-        )
-        return reward
-
     def _compute_dense_reward_pick_only(self, obs: Any, action: torch.Tensor, info: dict):
         """Pick-only reward: reach → grasp → close-hard → stay still.
         Episode auto-terminates on success (grasped + slow for N consecutive
         control steps); terminal bonus replaces the remaining-step reward so
         terminating early matches "continue at peak forever" total return.
-
-        If squint_native_reward=True, dispatches to a cleaner squint-native
-        Lift-style reward (see _compute_dense_reward_pick_only_squint_native).
-        Recommended for new runs — strictly exploit-free and tracks the
-        published squint design.
 
         Side-approach curriculum (pick_side_approach=True): before the FIXED
         finger touches the cube, the reward is (reach + open_coef·gripper_open)
@@ -1794,24 +1688,10 @@ class Place(DefaultCameraEnv):
         ladder. open_coef defaults to 0.3 so pre-touch peak (~1.3) is below
         the post-touch grasped-and-clamped peak (1 + strong_grasp_coef = 1.5);
         otherwise the policy would learn to hover and never touch."""
-        # Dispatch to the squint-native variant when opted in. Kept as an
-        # early branch so the legacy reward path below is untouched and
-        # existing checkpoints/runs remain reproducible.
-        if self.squint_native_reward:
-            return self._compute_dense_reward_pick_only_squint_native(
-                obs, action, info
-            )
-
         tcp_to_item_dist = torch.linalg.norm(
             self.agent.tcp_pose.p - self.item.pose.p, axis=1
         )
-        # k=10 (was 5) gives a much steeper gradient on the last 2-3 cm
-        # (the critical commit-to-touch zone). With k=5 the reach reward
-        # is essentially flat from 3cm down to 0cm (~0.92 → 1.00), so the
-        # policy has no incentive to descend the final approach — it
-        # settles into a hover local minimum. k=10 widens reach(0)/reach(3cm)
-        # from 0.92/1.00 to 0.74/1.00 → 3.5x stronger descent gradient.
-        reach = 1 - torch.tanh(10 * tcp_to_item_dist)
+        reach = 1 - torch.tanh(5 * tcp_to_item_dist)
         is_grasped = info["is_item_grasped"].float()
 
         gripper_min, gripper_max = self.agent.robot.get_qlimits()[0, -1, :]
@@ -1855,46 +1735,10 @@ class Place(DefaultCameraEnv):
                 / (gripper_max - gripper_min),
                 0.0, 1.0,
             )
-
-            # NOTE — exploit audit: the force-graded touch bonus that lived
-            # here in commit 5e040a7 was REMOVED because it could be maxed
-            # by *pushing* the cube with the fixed finger (no grasp needed,
-            # force ~5N maintained statically → +0.5 bonus indefinitely).
-            # The hover→push reward (1.80) was too close to the grasp reward
-            # (2.0 with coef=1.0), making "press without grasping" a
-            # competitive local optimum. Now relying on (1) steeper reach to
-            # force the descent, (2) higher strong_grasp_coef to make grasp
-            # clearly dominate any pre-grasp state. Both signals are
-            # impossible to hack: reach uses cube COM (pushing cube while
-            # TCP follows = same d → no extra reward); grasp signal comes
-            # from ManiSkill's two-finger force check.
-            #
-            # Reward shape (open_coef=0.3):
-            #
-            #   state                                 reward
-            #   ----------------------------------------------------
-            #   hover 5cm above cube, open            0.54 + 0.3 = 0.84
-            #   hover 3cm above cube, open            0.74 + 0.3 = 1.04
-            #   hover 1cm above cube, open            0.91 + 0.3 = 1.21
-            #   touching cube, open                   1.00 + 0.3 = 1.30
-            #   closing (open=0.5), at cube           1.00 + 0.15 = 1.15  ← dip
-            #   closed (open=0), at cube, not grasped 1.00 + 0    = 1.00  ← dip
-            #   grasped + clamped (coef=0.5 default)  1.00 + 0.5  = 1.50
-            #   grasped + clamped (coef=1.0)          1.00 + 1.0  = 2.00
-            #   grasped + clamped (coef=1.5)          1.00 + 1.5  = 2.50
-            #
-            # The closing dip (1.30 → 1.0) is unavoidable without the
-            # exploit-prone touch bonus. To compensate, BUMP
-            # --strong_grasp_coef to 1.5 so the grasp peak (2.5) clearly
-            # dominates the dip cost (≤3 steps × 0.3 = ≤0.9 lost).
-            # Terminal bonus scales as (1+coef)·remaining_steps, so coef=1.5
-            # ⇒ terminal up to 250 — still bounded, q_max should stay <100.
-            pre_grasp_reward = (
-                reach
-                + self.pick_side_approach_open_coef * gripper_open
+            pre_touch_reward = reach + self.pick_side_approach_open_coef * gripper_open
+            reward = torch.where(
+                self._fixed_finger_touched, normal_reward, pre_touch_reward
             )
-            grasped_reward = 1.0 + self.strong_grasp_coef * target_closure
-            reward = torch.where(is_grasped.bool(), grasped_reward, pre_grasp_reward)
         else:
             reward = normal_reward
 
@@ -1958,6 +1802,20 @@ class Place(DefaultCameraEnv):
             )
             staged = torch.clamp((info["split_stage"] + target_progress) / C, 0.0, 1.0)
             phase1 = reach + self.split_sep_coef * staged
+        elif self.split_closest_first:
+            # Closest-pair-first: reach the tightest pair's midpoint (xy) and
+            # push it apart; sep_progress = (separated pairs + closest-pair
+            # progress)/num_pairs, so the closest cubes separate first.
+            C = len(self.distractors) + 1
+            num_pairs = C * (C - 1) / 2
+            reach = 1 - torch.tanh(
+                5 * torch.linalg.norm(tcp[:, :2] - info["split_closest_pair_mid"][:, :2], axis=1)
+            )
+            closest_progress = torch.clamp(info["min_gap"] / self.split_target_gap, 0.0, 1.0)
+            sep_progress = torch.clamp(
+                (info["split_num_separated"] + closest_progress) / num_pairs, 0.0, 1.0
+            )
+            phase1 = reach + self.split_sep_coef * sep_progress
         else:
             # Reach the NEAREST cube; progress on the smallest pairwise gap.
             cube_pos = torch.stack(
@@ -1979,6 +1837,13 @@ class Place(DefaultCameraEnv):
         else:
             reward = phase1
             per_step_peak = 1.0 + self.split_sep_coef
+
+        # Low-gripper shaping: pull the TCP z toward split_low_hover_z above the
+        # table (cube-pushing height). Always active when enabled.
+        if self.split_low_hover_coef > 0.0:
+            low_z = 1 - torch.tanh(15 * torch.abs(tcp[:, 2] - self.split_low_hover_z))
+            reward = reward + self.split_low_hover_coef * low_z
+            per_step_peak = per_step_peak + self.split_low_hover_coef
 
         # User-requested contact penalties: table + bowl (bin).
         reward = reward - self.split_table_penalty_coef * info["robot_touching_table"].float()

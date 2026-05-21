@@ -744,8 +744,14 @@ if __name__ == "__main__":
         eval_env_kwargs["n_distractors"] = args.n_distractors
         env_kwargs["use_real_bowl"] = args.use_real_bowl
         eval_env_kwargs["use_real_bowl"] = args.use_real_bowl
-        env_kwargs["skip_bowl"] = args.skip_bowl
-        eval_env_kwargs["skip_bowl"] = args.skip_bowl
+        # skip_bowl / squint_native_reward are custom flags that are NOT in
+        # fede master's place.py (envs/ was synced from fede master). Pass
+        # them only when explicitly True so a standard run doesn't trigger an
+        # unexpected-kwarg TypeError. Enabling either requires re-adding the
+        # flag to envs/place.py first.
+        if args.skip_bowl:
+            env_kwargs["skip_bowl"] = args.skip_bowl
+            eval_env_kwargs["skip_bowl"] = args.skip_bowl
         env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         eval_env_kwargs["action_smooth_coef"] = args.action_smooth_coef
         env_kwargs["pick_only_reward"] = args.pick_only_reward
@@ -756,8 +762,9 @@ if __name__ == "__main__":
         eval_env_kwargs["pick_side_approach_open_coef"] = args.pick_side_approach_open_coef
         env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
         eval_env_kwargs["strong_grasp_coef"] = args.strong_grasp_coef
-        env_kwargs["squint_native_reward"] = args.squint_native_reward
-        eval_env_kwargs["squint_native_reward"] = args.squint_native_reward
+        if args.squint_native_reward:
+            env_kwargs["squint_native_reward"] = args.squint_native_reward
+            eval_env_kwargs["squint_native_reward"] = args.squint_native_reward
         env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
         eval_env_kwargs["drop_penalty_coef"] = args.drop_penalty_coef
         env_kwargs["split_only_reward"] = args.split_only_reward
