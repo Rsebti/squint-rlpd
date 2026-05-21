@@ -718,11 +718,15 @@ class Place(DefaultCameraEnv):
 
         if self.use_real_bowl:
             import os
-            # Procedural white-carton bowl (truncated-cone shell): bottom Ø10 cm,
-            # rim Ø15 cm, height 4.5 cm, 1 mm wall. Regenerate via
-            # scripts/gen_carton_bowl.py.
+            # NOTE: fede master switched to the procedural white-carton bowl
+            # (bowl_carton.obj, truncated-cone Ø10/15 cm × 4.5 cm). We revert
+            # to the SAM-3D round bowl (bowl.obj) because the scripted FK/IK
+            # demo collector (scripts/collect_rlpd_demos.py, Tom's pipeline)
+            # is tuned for the round bowl — the carton's slanted walls + 5 cm
+            # success radius deflect the dropped cube, giving 0/50 successes.
+            # Set back to bowl_carton.obj if you re-tune the collector for it.
             mesh_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "meshes", "bowl_carton.obj"
+                os.path.dirname(os.path.abspath(__file__)), "meshes", "bowl.obj"
             )
             # Read mesh AABB to set bin_half_sizes (used by success check).
             try:
