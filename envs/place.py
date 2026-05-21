@@ -816,11 +816,14 @@ class Place(DefaultCameraEnv):
                     material=bowl_material,
                     density=500.0,
                     decomposition="coacd",
-                    # Thin (1 mm) shell: low concavity threshold + more hulls so
-                    # CoACD wraps the walls and KEEPS the open cavity (a coarse
-                    # decomposition fills the bowl, blocking the cube). More hulls
-                    # = more GPU memory at high num_envs — drop if OOM at 2048.
-                    decomposition_params=dict(threshold=0.04, max_convex_hull=48),
+                    # Reverted to tom-separating-cubes params (threshold=0.3,
+                    # max_convex_hull=8): the round SAM-3D bowl.obj works with
+                    # this coarse decomposition. fede master's fine params
+                    # (threshold=0.04, max_convex_hull=48) were tuned for the
+                    # carton mesh and produce degenerate thin hulls on the
+                    # round bowl → broken PhysX collision → the dynamic bin
+                    # falls through the table (bowl_z = -45 m observed).
+                    decomposition_params=dict(threshold=0.3, max_convex_hull=8),
                 )
                 # Visual from .ply alongside .obj. Bowl color is forced
                 # white by _randomize_bowl_tint (base_color + emission),
