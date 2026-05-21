@@ -232,6 +232,10 @@ for batch_i in range(MAX_BATCHES):
 
     rgb_buf, st_buf, act_buf, rew_buf, done_buf = [], [], [], [], []
     hires_buf = []
+    # Diagnostics: track per-env max cube z (was it ever lifted?) and whether
+    # the cube was grasped at any point during the episode.
+    max_cube_z = cube_p[:, 2].copy()
+    ever_grasped = np.zeros(BATCH_SIZE, dtype=bool)
     for t in range(T):
         rgb_buf.append(make_rgb_downsampled(obs))
         st_buf.append(make_state(obs))
@@ -245,6 +249,14 @@ for batch_i in range(MAX_BATCHES):
         rew_buf.append(rew.cpu().numpy() if torch.is_tensor(rew) else np.asarray(rew))
         done_buf.append((term | trunc).cpu().numpy() if torch.is_tensor(term)
                           else np.asarray(term | trunc))
+        # Track lift + grasp for diagnostics
+        _cz = ue.item.pose.p[:, 2].detach().cpu().numpy()
+        max_cube_z = np.maximum(max_cube_z, _cz)
+        try:
+            _g = ue.agent.is_grasping(ue.item).detach().cpu().numpy().astype(bool)
+            ever_grasped = ever_grasped | _g
+        except Exception:
+            pass
 
     rgb_arr   = np.stack(rgb_buf,  axis=1)
     st15_arr  = np.stack(st_buf,   axis=1)
@@ -255,6 +267,18 @@ for batch_i in range(MAX_BATCHES):
     final_cube_xy = ue.item.pose.p[:, :2].cpu().numpy()
     final_cube_z  = ue.item.pose.p[:, 2].cpu().numpy()
     dist = np.linalg.norm(final_cube_xy - bowl_p[:, :2], axis=1)
+
+    # ── Diagnostic (first 2 batches): pinpoint where the pipeline breaks ──
+    if batch_i < 2:
+        cube_half_dbg = ue.item_half_sizes[0].cpu().item()
+        lift_thresh = cube_p[:, 2] + 0.03  # 3cm above spawn = "was lifted"
+        print(f"  [diag b{batch_i}] cube_half={cube_half_dbg:.4f} "
+              f"bowl_z={bowl_p[0,2]:.3f} bowl_hz={getattr(ue,'bowl_half_z',0.0265):.4f}")
+        for i in range(BATCH_SIZE):
+            print(f"    env{i}: spawn_z={cube_p[i,2]:.3f} max_z={max_cube_z[i]:.3f} "
+                  f"final_z={final_cube_z[i]:.3f} dist_bowl={dist[i]:.3f} "
+                  f"grasped={bool(ever_grasped[i])} "
+                  f"lifted={bool(max_cube_z[i] > lift_thresh[i])}")
 
     n_added = 0
     for i in range(BATCH_SIZE):
